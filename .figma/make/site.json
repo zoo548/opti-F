@@ -1,0 +1,10 @@
+{
+  "description": "This app optimizes hybrid routes combining public transport and taxis, offering personalized travel options for users seeking efficient and cost-effective journeys.",
+  "robots": {
+    "index": false
+  },
+  "accessibility": {
+    "addBypassLinks": false,
+    "ignoreReducedMotion": false
+  }
+}

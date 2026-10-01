@@ -1,0 +1,123 @@
+@import url('https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
+@import 'tailwindcss';
+
+@theme {
+  --color-opti-blue: #2F7BF6;
+  --color-opti-blue-light: #EBF2FF;
+  --color-opti-blue-mid: #BFDBFE;
+  --color-opti-orange: #FF6B3D;
+  --color-opti-orange-light: #FFF0EB;
+  --color-opti-green: #22C55E;
+  --color-opti-green-light: #DCFCE7;
+  --color-opti-red: #EF4444;
+  --color-opti-purple: #8B5CF6;
+  --color-opti-gold: #EAB308;
+  --color-surface: #F5F6FA;
+  --color-card: #FFFFFF;
+  --color-border: #E8EAEF;
+  --color-text-primary: #0F1729;
+  --color-text-secondary: #6B7280;
+  --color-text-muted: #9CA3AF;
+
+  --font-sans: 'Pretendard', 'Noto Sans KR', 'Inter', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', monospace;
+}
+
+* {
+  box-sizing: border-box;
+  -webkit-font-smoothing: antialiased;
+}
+
+html,
+body,
+#root {
+  min-height: 100dvh;
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: var(--font-sans);
+  background: #E8EAEF;
+}
+
+#root {
+  width: 100%;
+}
+
+::-webkit-scrollbar { display: none; }
+scrollbar-width: none;
+
+.mono { font-family: var(--font-mono); }
+
+/* Transit line colors */
+.line-gtx { background: #8B5CF6; }
+.line-3 { background: #F97316; }
+.line-9 { background: #EAB308; }
+.line-bus { background: #2F7BF6; }
+.line-maul { background: #22C55E; }
+.line-walk { background: #9CA3AF; }
+.line-taxi { background: #FF6B3D; }
+
+/* Animations */
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes spin-slow {
+  to { transform: rotate(360deg); }
+}
+
+@keyframes progress-ring {
+  from { stroke-dashoffset: 220; }
+  to { stroke-dashoffset: var(--target-offset); }
+}
+
+.animate-fade-in { animation: fadeIn 0.3s ease forwards; }
+.animate-spin-slow { animation: spin-slow 2s linear infinite; }
+
+/* Pareto chart */
+.pareto-dot {
+  transition: r 0.2s ease, filter 0.2s ease;
+  cursor: pointer;
+}
+.pareto-dot:hover { filter: brightness(1.15); }
+
+.range-dual {
+  appearance: none;
+  background: transparent;
+  pointer-events: none;
+}
+
+.range-dual::-webkit-slider-thumb {
+  width: 22px;
+  height: 22px;
+  appearance: none;
+  border: 3px solid #2F7BF6;
+  border-radius: 999px;
+  background: #FFFFFF;
+  box-shadow: 0 1px 5px rgba(15, 23, 42, 0.16);
+  cursor: pointer;
+  pointer-events: auto;
+}
+
+.range-dual::-moz-range-thumb {
+  width: 16px;
+  height: 16px;
+  border: 3px solid #2F7BF6;
+  border-radius: 999px;
+  background: #FFFFFF;
+  box-shadow: 0 1px 5px rgba(15, 23, 42, 0.16);
+  cursor: pointer;
+  pointer-events: auto;
+}
+
+.wheel-column {
+  scrollbar-width: none;
+  overscroll-behavior: contain;
+}
+
+.wheel-column::-webkit-scrollbar {
+  display: none;
+}
