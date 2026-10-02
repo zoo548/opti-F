@@ -7,7 +7,9 @@ import logging
 import math
 import os
 import re
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 
 import numpy as np
@@ -230,6 +232,10 @@ def split_subway_congestion(seg, start_dt, cong, threshold=CONGESTION_THRESHOLD)
 
 
 ODSAY_ERRORS = {}      # {오류문구: 발생횟수}  — 한도 초과 등을 마지막에 요약
+_ODSAY_ERR_LOCK = threading.Lock()
+HYBRID_MAX_PER_TYPE = 15
+ANALYZE_WORKERS = 5
+MAX_DETOUR_RATIO = 1.45
 
 
 def _odsay_headers():
@@ -254,7 +260,8 @@ def _odsay_error(js):
 
 def _note_odsay_error(where, msg):
     key = f"{where}: {msg}"
-    ODSAY_ERRORS[key] = ODSAY_ERRORS.get(key, 0) + 1
+    with _ODSAY_ERR_LOCK:
+        ODSAY_ERRORS[key] = ODSAY_ERRORS.get(key, 0) + 1
 
 
 def odsay_paths_raw(odsay_key, s_lat, s_lon, e_lat, e_lon):
@@ -577,22 +584,140 @@ def tmap_taxi(tmap_key, s_lat, s_lon, e_lat, e_lon, depart_iso):
 # =====================================================================
 # 대안 생성 (PT / TP)
 # =====================================================================
-def collect_alternatives(P, origin, dest, cong):
+def _haversine_km(lat1, lon1, lat2, lon2):
+    r = 6371.0
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlmb = math.radians(lon2 - lon1)
+    a = math.sin(dphi / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dlmb / 2) ** 2
+    return 2 * r * math.asin(min(1.0, math.sqrt(a)))
+
+
+def _coord_key(lat, lon):
+    return (round(float(lat), 5), round(float(lon), 5))
+
+
+def _resolve_max_cand(P):
+    raw = P.get("max_cand")
+    try:
+        val = int(raw)
+    except (TypeError, ValueError):
+        val = 20
+    if val <= 0:
+        val = 20
+    return val
+
+
+def _pick_hybrid_stations(cands, origin, dest, kind, limit=HYBRID_MAX_PER_TYPE):
+    """직선거리 우회율이 큰 역을 버리고, 유형별로 유망한 환승역만 남긴다."""
+    od = _haversine_km(origin["lat"], origin["lon"], dest["lat"], dest["lon"])
+    od = max(od, 0.05)
+    scored = []
+    skipped = 0
+    for name, (clon, clat) in cands:
+        d_os = _haversine_km(origin["lat"], origin["lon"], clat, clon)
+        d_sd = _haversine_km(clat, clon, dest["lat"], dest["lon"])
+        detour = (d_os + d_sd) / od
+        if detour > MAX_DETOUR_RATIO:
+            skipped += 1
+            continue
+        # PT는 목적지 쪽 막바지 택시, TP는 출발지 쪽 선택시가 유리하다.
+        last = d_sd if kind == "PT" else d_os
+        scored.append((detour, last, name, clon, clat))
+    scored.sort()
+    out, seen = [], set()
+    for _detour, _last, name, clon, clat in scored:
+        if name in seen:
+            continue
+        seen.add(name)
+        out.append((name, (clon, clat)))
+        if len(out) >= limit:
+            break
+    log.info(
+        f"    {kind} 환승역 선별: 입력 {len(cands)} → 우회 제외 {skipped} → 채택 {len(out)}/{limit}"
+    )
+    return out
+
+
+class _ApiMeter:
+    """같은 요청 안에서는 동일한 역 쌍 API를 한 번만 호출한다."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.odsay_n = 0
+        self.odsay_s = 0.0
+        self.tmap_n = 0
+        self.tmap_s = 0.0
+        self.odsay_cache = {}
+        self.tmap_cache = {}
+
+    def odsay_paths(self, odsay_key, s_lat, s_lon, e_lat, e_lon):
+        ck = (_coord_key(s_lat, s_lon), _coord_key(e_lat, e_lon))
+        with self.lock:
+            hit = self.odsay_cache.get(ck)
+        if hit is not None:
+            return hit
+        t0 = time.perf_counter()
+        paths = odsay_paths_raw(odsay_key, s_lat, s_lon, e_lat, e_lon)
+        dt = time.perf_counter() - t0
+        with self.lock:
+            self.odsay_n += 1
+            self.odsay_s += dt
+            self.odsay_cache[ck] = paths
+        return paths
+
+    def taxi(self, tmap_key, s_lat, s_lon, e_lat, e_lon, depart_iso):
+        minute_key = (depart_iso or "")[:16]
+        ck = (_coord_key(s_lat, s_lon), _coord_key(e_lat, e_lon), minute_key)
+        with self.lock:
+            hit = self.tmap_cache.get(ck)
+        if hit is not None:
+            return hit
+        t0 = time.perf_counter()
+        result = tmap_taxi(tmap_key, s_lat, s_lon, e_lat, e_lon, depart_iso)
+        dt = time.perf_counter() - t0
+        with self.lock:
+            self.tmap_n += 1
+            self.tmap_s += dt
+            self.tmap_cache[ck] = result
+        return result
+
+
+def collect_alternatives(P, origin, dest, cong, progress_cb=None):
     rows, geoms = [], {}
     rid = 0
+    rid_lock = threading.Lock()
+    meter = _ApiMeter()
+    stats = {
+        "station_s": 0.0,
+        "hybrid_s": 0.0,
+        "raw_stations": 0,
+        "pt_planned": 0,
+        "tp_planned": 0,
+    }
 
     def nid():
         nonlocal rid
-        rid += 1
-        return f"R{rid:04d}"
+        with rid_lock:
+            rid += 1
+            return f"R{rid:04d}"
+
+    def report(progress, stage):
+        if progress_cb:
+            try:
+                progress_cb(int(max(0, min(100, progress))), stage)
+            except Exception:
+                pass
 
     dep_iso = P["dep_dt"].strftime("%Y-%m-%dT%H:%M:%S+0900")
     thr = P["threshold"]
+    max_cand = _resolve_max_cand(P)
 
     # ── Only 택시 ───────────────────────────────────────────────
     log.info("\n  Only 택시 직행")
-    tt, tf, tcoords = tmap_taxi(P["tmap_key"], origin["lat"], origin["lon"],
-                                dest["lat"], dest["lon"], dep_iso)
+    report(4, "환승 지점을 찾고 있어요")
+    tt, tf, tcoords = meter.taxi(
+        P["tmap_key"], origin["lat"], origin["lon"], dest["lat"], dest["lon"], dep_iso)
     if tt is not None:
         _id = nid()
         rows.append(dict(id=_id, 유형="Only 택시", 경로순위=0, 환승지점="-", 모드전환=0,
@@ -608,9 +733,15 @@ def collect_alternatives(P, origin, dest, cong):
 
     # ── Only 대중교통 (최속 3개) ────────────────────────────────
     log.info("\n  대중교통 최속 경로 3개 조회")
-    routes = top3_transit_routes(P["odsay_key"], origin, dest)
+    t_st = time.perf_counter()
+    report(8, "환승 지점을 찾고 있어요")
+    routes = meter.odsay_paths(
+        P["odsay_key"], origin["lat"], origin["lon"], dest["lat"], dest["lon"])
+    routes = sorted(routes, key=lambda p: p.get("info", {}).get("totalTime", 10 ** 9))[:3]
     log.info(f"    {len(routes)}개 수신")
 
+    pooled = []
+    pooled_seen = set()
     for rank, path in enumerate(routes, 1):
         segs, agg = transit_segments(P["odsay_key"], path, P["dep_dt"], cong, thr)
         summary = " -> ".join(f"{s['수단']}({s['시간(분)']:.0f}분)"
@@ -633,7 +764,6 @@ def collect_alternatives(P, origin, dest, cong):
               f"(판정 {agg['판정역수']}역 중 혼잡 {agg['혼잡역수']}역, "
               f"판정불가 {agg['판정불가구간']}구간)")
 
-        # 환승 후보역 수집
         stations = [s for seg in segs if seg["대분류"] in ("버스", "지하철")
                     for s in zip(seg["stop_names"], seg["stops"])]
         uniq, seen = [], set()
@@ -642,70 +772,132 @@ def collect_alternatives(P, origin, dest, cong):
                 continue
             seen.add(name)
             uniq.append((name, xy))
-        cand = uniq[:P["max_cand"]]
-        log.info(f"        환승후보 {len(cand)}개 (PT/TP 각각)")
+        cand = uniq[:max_cand]
+        log.info(f"        환승후보 {len(cand)}개 (경로별 max_cand={max_cand})")
+        for name, xy in cand:
+            if name in pooled_seen or not xy or len(xy) < 2:
+                continue
+            pooled_seen.add(name)
+            pooled.append((name, xy))
 
-        # PT: 출발지 -대중교통-> 후보역 -택시-> 목적지
-        for name, (clon, clat) in cand:
-            legs = odsay_paths_raw(P["odsay_key"], origin["lat"], origin["lon"], clat, clon)
-            if not legs:
-                continue
-            leg = sorted(legs, key=lambda p: p["info"]["totalTime"])[0]
-            lsegs, lagg = transit_segments(P["odsay_key"], leg, P["dep_dt"], cong, thr)
-            t_min = lagg["총시간"]
-            taxi_iso = (P["dep_dt"] + timedelta(minutes=t_min)).strftime("%Y-%m-%dT%H:%M:%S+0900")
-            stt, stf, st_coords = tmap_taxi(P["tmap_key"], clat, clon,
-                                            dest["lat"], dest["lon"], taxi_iso)
-            if stt is None:
-                continue
-            _id = nid()
-            lsum = " -> ".join(f"{s['수단']}({s['시간(분)']:.0f}분)"
-                               for s in lsegs if s["대분류"] != "도보")
-            rows.append(dict(id=_id, 유형="PT(대중교통+택시)", 경로순위=rank, 환승지점=name,
-                             모드전환=1,
-                             버스=lagg["버스"], 지하철여유=lagg["지하철여유"],
-                             지하철혼잡=lagg["지하철혼잡"], 도보=lagg["도보"],
-                             택시=round(stt, 1), 기타=lagg["기타"],
-                             환승횟수=lagg["환승횟수"],
-                             비용=(lagg["비용"] or 0) + (stf or 0),
-                             실소요시간=round(t_min + stt, 1),
-                             구간요약=f"{lsum} -> 택시({stt:.0f}분)",
-                             판정불가구간=lagg["판정불가구간"]))
-            geoms[_id] = {"segments": lsegs, "taxi": st_coords,
-                          "transfer": (clon, clat), "mapObj": lagg["mapObj"]}
-            time.sleep(0.1)
+    pt_cands = _pick_hybrid_stations(pooled, origin, dest, "PT")
+    tp_cands = _pick_hybrid_stations(pooled, origin, dest, "TP")
+    stats["station_s"] = time.perf_counter() - t_st
+    stats["raw_stations"] = len(pooled)
+    stats["pt_planned"] = len(pt_cands)
+    stats["tp_planned"] = len(tp_cands)
+    log.info(
+        f"  환승 후보역 탐색 {stats['station_s']:.2f}s / 고유역 {len(pooled)} / "
+        f"PT {len(pt_cands)} / TP {len(tp_cands)}"
+    )
 
-        # TP: 출발지 -택시-> 후보역 -대중교통-> 목적지
-        for name, (clon, clat) in cand:
-            stt2, stf2, st2 = tmap_taxi(P["tmap_key"], origin["lat"], origin["lon"],
-                                        clat, clon, dep_iso)
-            if stt2 is None:
-                continue
-            legs2 = odsay_paths_raw(P["odsay_key"], clat, clon, dest["lat"], dest["lon"])
-            if not legs2:
-                continue
-            leg2 = sorted(legs2, key=lambda p: p["info"]["totalTime"])[0]
-            # 택시로 이동한 뒤부터 대중교통을 타므로 시작시각을 뒤로 민다
-            lsegs2, lagg2 = transit_segments(
-                P["odsay_key"], leg2, P["dep_dt"] + timedelta(minutes=stt2), cong, thr)
-            _id = nid()
-            lsum2 = " -> ".join(f"{s['수단']}({s['시간(분)']:.0f}분)"
-                                for s in lsegs2 if s["대분류"] != "도보")
-            rows.append(dict(id=_id, 유형="TP(택시+대중교통)", 경로순위=rank, 환승지점=name,
-                             모드전환=1,
-                             버스=lagg2["버스"], 지하철여유=lagg2["지하철여유"],
-                             지하철혼잡=lagg2["지하철혼잡"], 도보=lagg2["도보"],
-                             택시=round(stt2, 1), 기타=lagg2["기타"],
-                             환승횟수=lagg2["환승횟수"],
-                             비용=(stf2 or 0) + (lagg2["비용"] or 0),
-                             실소요시간=round(stt2 + lagg2["총시간"], 1),
-                             구간요약=f"택시({stt2:.0f}분) -> {lsum2}",
-                             판정불가구간=lagg2["판정불가구간"]))
-            geoms[_id] = {"segments": lsegs2, "taxi": st2,
-                          "transfer": (clon, clat), "mapObj": lagg2["mapObj"]}
-            time.sleep(0.1)
+    planned = max(1, len(pt_cands) + len(tp_cands))
+    done_hyb = 0
+    done_lock = threading.Lock()
 
-    return rows, geoms
+    def bump():
+        nonlocal done_hyb
+        with done_lock:
+            done_hyb += 1
+            frac = done_hyb / planned
+            report(12 + int(frac * 72), "경로를 비교하고 있어요")
+
+    def build_pt(name, clon, clat):
+        legs = meter.odsay_paths(P["odsay_key"], origin["lat"], origin["lon"], clat, clon)
+        if not legs:
+            return None
+        leg = sorted(legs, key=lambda p: p["info"]["totalTime"])[0]
+        lsegs, lagg = transit_segments(P["odsay_key"], leg, P["dep_dt"], cong, thr)
+        t_min = lagg["총시간"]
+        taxi_iso = (P["dep_dt"] + timedelta(minutes=t_min)).strftime("%Y-%m-%dT%H:%M:%S+0900")
+        stt, stf, st_coords = meter.taxi(P["tmap_key"], clat, clon, dest["lat"], dest["lon"], taxi_iso)
+        if stt is None:
+            return None
+        _id = nid()
+        lsum = " -> ".join(f"{s['수단']}({s['시간(분)']:.0f}분)"
+                           for s in lsegs if s["대분류"] != "도보")
+        row = dict(id=_id, 유형="PT(대중교통+택시)", 경로순위=1, 환승지점=name,
+                   모드전환=1,
+                   버스=lagg["버스"], 지하철여유=lagg["지하철여유"],
+                   지하철혼잡=lagg["지하철혼잡"], 도보=lagg["도보"],
+                   택시=round(stt, 1), 기타=lagg["기타"],
+                   환승횟수=lagg["환승횟수"],
+                   비용=(lagg["비용"] or 0) + (stf or 0),
+                   실소요시간=round(t_min + stt, 1),
+                   구간요약=f"{lsum} -> 택시({stt:.0f}분)",
+                   판정불가구간=lagg["판정불가구간"])
+        geom = {"segments": lsegs, "taxi": st_coords,
+                "transfer": (clon, clat), "mapObj": lagg["mapObj"]}
+        return row, geom, _id
+
+    def build_tp(name, clon, clat):
+        stt2, stf2, st2 = meter.taxi(
+            P["tmap_key"], origin["lat"], origin["lon"], clat, clon, dep_iso)
+        if stt2 is None:
+            return None
+        legs2 = meter.odsay_paths(P["odsay_key"], clat, clon, dest["lat"], dest["lon"])
+        if not legs2:
+            return None
+        leg2 = sorted(legs2, key=lambda p: p["info"]["totalTime"])[0]
+        lsegs2, lagg2 = transit_segments(
+            P["odsay_key"], leg2, P["dep_dt"] + timedelta(minutes=stt2), cong, thr)
+        _id = nid()
+        lsum2 = " -> ".join(f"{s['수단']}({s['시간(분)']:.0f}분)"
+                            for s in lsegs2 if s["대분류"] != "도보")
+        row = dict(id=_id, 유형="TP(택시+대중교통)", 경로순위=1, 환승지점=name,
+                   모드전환=1,
+                   버스=lagg2["버스"], 지하철여유=lagg2["지하철여유"],
+                   지하철혼잡=lagg2["지하철혼잡"], 도보=lagg2["도보"],
+                   택시=round(stt2, 1), 기타=lagg2["기타"],
+                   환승횟수=lagg2["환승횟수"],
+                   비용=(stf2 or 0) + (lagg2["비용"] or 0),
+                   실소요시간=round(stt2 + lagg2["총시간"], 1),
+                   구간요약=f"택시({stt2:.0f}분) -> {lsum2}",
+                   판정불가구간=lagg2["판정불가구간"])
+        geom = {"segments": lsegs2, "taxi": st2,
+                "transfer": (clon, clat), "mapObj": lagg2["mapObj"]}
+        return row, geom, _id
+
+    t_hyb = time.perf_counter()
+    report(12, "경로를 비교하고 있어요")
+    jobs = []
+    for name, (clon, clat) in pt_cands:
+        jobs.append(("PT", name, clon, clat))
+    for name, (clon, clat) in tp_cands:
+        jobs.append(("TP", name, clon, clat))
+
+    def run_job(kind, name, clon, clat):
+        try:
+            if kind == "PT":
+                return build_pt(name, clon, clat)
+            return build_tp(name, clon, clat)
+        except Exception as exc:
+            log.warning("    %s %s 실패: %s", kind, name, exc)
+            return None
+
+    if jobs:
+        with ThreadPoolExecutor(max_workers=ANALYZE_WORKERS) as pool:
+            futs = [pool.submit(run_job, kind, name, clon, clat) for kind, name, clon, clat in jobs]
+            for fut in as_completed(futs):
+                item = fut.result()
+                bump()
+                if not item:
+                    continue
+                row, geom, _id = item
+                rows.append(row)
+                geoms[_id] = geom
+
+    stats["hybrid_s"] = time.perf_counter() - t_hyb
+    stats["odsay_n"] = meter.odsay_n
+    stats["odsay_s"] = meter.odsay_s
+    stats["tmap_n"] = meter.tmap_n
+    stats["tmap_s"] = meter.tmap_s
+    log.info(
+        f"  ODsay 호출 {meter.odsay_n}회 / {meter.odsay_s:.2f}s, "
+        f"TMAP 호출 {meter.tmap_n}회 / {meter.tmap_s:.2f}s, "
+        f"하이브리드 {stats['hybrid_s']:.2f}s (workers={ANALYZE_WORKERS})"
+    )
+    return rows, geoms, stats
 
 
 # =====================================================================
@@ -995,24 +1187,43 @@ def _unknown_lines(geoms):
     return names
 
 
-def analyze_routes(origin: dict, dest: dict, depart_dt: datetime, params: dict | None = None) -> dict:
+def analyze_routes(
+    origin: dict,
+    dest: dict,
+    depart_dt: datetime,
+    params: dict | None = None,
+    progress_cb=None,
+) -> dict:
     """좌표가 주어진 출발/도착에 대해 복합경로·GC·파레토·Knee를 계산한다."""
     ODSAY_ERRORS.clear()
     _LANE_CACHE.clear()
+    t_all = time.perf_counter()
 
+    def report(progress, stage):
+        if progress_cb:
+            try:
+                progress_cb(int(max(0, min(100, progress))), stage)
+            except Exception:
+                pass
+
+    report(1, "서버를 깨우는 중이에요")
     P = _merge_params(params)
     P["dep_dt"] = depart_dt
     origin = _as_point(origin)
     dest = _as_point(dest)
 
+    t0 = time.perf_counter()
     cong = get_congestion()
-    rows, geoms = collect_alternatives(P, origin, dest, cong)
+    cong_s = time.perf_counter() - t0
+    report(6, "환승 지점을 찾고 있어요")
+    rows, geoms, api_stats = collect_alternatives(P, origin, dest, cong, progress_cb=report)
     if not rows:
         warnings = []
         if cong is None:
             warnings.append(f"혼잡도 파일을 찾지 못했습니다: {CONGESTION_FILE}")
         for k, v in sorted(ODSAY_ERRORS.items(), key=lambda x: -x[1]):
             warnings.append(f"{v}회 {k}")
+        report(100, "경로를 비교하고 있어요")
         return {
             "candidates": [],
             "top_gc": [],
@@ -1021,6 +1232,8 @@ def analyze_routes(origin: dict, dest: dict, depart_dt: datetime, params: dict |
             "warnings": warnings,
         }
 
+    report(90, "경로를 비교하고 있어요")
+    t1 = time.perf_counter()
     df = build_dataframe(rows, P)
     df = df[df["실소요시간"] > 0].reset_index(drop=True)
 
@@ -1031,6 +1244,7 @@ def analyze_routes(origin: dict, dest: dict, depart_dt: datetime, params: dict |
     knees = top_by_knee(pareto, k=3)
 
     hydrate_geometry(P["odsay_key"], geoms, list(df["id"]), verbose=True)
+    score_s = time.perf_counter() - t1
 
     pareto_ids = set(pareto["id"].tolist())
     knee_map = {r["id"]: float(r["KneeScore"]) for _, r in pareto.iterrows()} if "KneeScore" in pareto.columns else {}
@@ -1070,6 +1284,29 @@ def analyze_routes(origin: dict, dest: dict, depart_dt: datetime, params: dict |
     if len(df):
         fastest = str(df.loc[df["실소요시간"].idxmin(), "id"])
         cheapest = str(df.loc[df["비용"].idxmin(), "id"])
+
+    type_counts = df["유형"].value_counts().to_dict() if len(df) else {}
+    log.info(
+        "  단계 시간: 혼잡도 %.2fs / 환승후보 %.2fs / ODsay %d회 %.2fs / "
+        "TMAP %d회 %.2fs / 혼잡·GC·파레토 %.2fs / 전체 %.2fs",
+        cong_s,
+        api_stats.get("station_s", 0.0),
+        api_stats.get("odsay_n", 0),
+        api_stats.get("odsay_s", 0.0),
+        api_stats.get("tmap_n", 0),
+        api_stats.get("tmap_s", 0.0),
+        score_s,
+        time.perf_counter() - t_all,
+    )
+    log.info(
+        "  후보 수: 전체 %d / %s / 외부 API %d회 (ODsay %d + TMAP %d)",
+        len(df),
+        type_counts,
+        api_stats.get("odsay_n", 0) + api_stats.get("tmap_n", 0),
+        api_stats.get("odsay_n", 0),
+        api_stats.get("tmap_n", 0),
+    )
+    report(100, "경로를 비교하고 있어요")
 
     return {
         "candidates": candidates,

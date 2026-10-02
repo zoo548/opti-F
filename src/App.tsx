@@ -33,6 +33,8 @@ type TripContextValue = {
   setDestination: (place: Place | null) => void
   analysis: AnalyzeResponse | null
   analyzeError: string | null
+  analyzeProgress: number
+  analyzeStage: string
   selectedRoute: RouteCandidate | null
   setSelectedRoute: (route: RouteCandidate | null) => void
   departTime: string | null
@@ -1608,9 +1610,9 @@ function SearchInputScreen({ onNav }: { onNav: (s: Screen) => void }) {
 
 function AnalyzingScreen({ onNav }: { onNav: (s: Screen) => void }) {
   const trip = useTrip()
-  const [progress, setProgress] = useState(12)
-  const [waking, setWaking] = useState(false)
   const finishing = useRef(false)
+  const progress = trip.analyzeProgress
+  const stage = trip.analyzeStage || '서버를 깨우는 중이에요'
 
   const finishSearch = () => {
     if (finishing.current) return
@@ -1635,25 +1637,6 @@ function AnalyzingScreen({ onNav }: { onNav: (s: Screen) => void }) {
     finishSearch()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
-
-  useEffect(() => {
-    if (trip.analyzeError || trip.analysis) return
-    setProgress(12)
-    setWaking(false)
-    const wake = window.setTimeout(() => setWaking(true), 10_000)
-    return () => window.clearTimeout(wake)
-  }, [trip.analyzeError, trip.analysis])
-
-  useEffect(() => {
-    const iv = window.setInterval(() => {
-      setProgress(p => {
-        if (trip.analyzeError) return p
-        if (trip.analysis) return 100
-        return Math.min(p + 1.2, 92)
-      })
-    }, 80)
-    return () => window.clearInterval(iv)
-  }, [trip.analyzeError, trip.analysis])
 
   const r = 52, circ = 2 * Math.PI * r
   const offset = circ * (1 - progress / 100)
@@ -1683,11 +1666,8 @@ function AnalyzingScreen({ onNav }: { onNav: (s: Screen) => void }) {
             </div>
 
             <div className="text-[17px] font-semibold text-[#111827] mb-1.5">최적 경로를 찾고 있어요</div>
-            <div className="text-[13px] text-[#9CA3AF] mb-3">약 10-30초 소요됩니다</div>
-            {waking && (
-              <div className="text-[13px] text-[#2F7BF6] font-medium mb-7">서버를 깨우는 중이에요</div>
-            )}
-            {!waking && <div className="mb-10" />}
+            <div className="text-[13px] text-[#9CA3AF] mb-3">거리에 따라 최대 1~2분 걸릴 수 있어요</div>
+            <div className="text-[13px] text-[#2F7BF6] font-medium mb-7">{stage}</div>
 
             <div className="flex gap-1.5 mb-10">
               {[0,1,2].map(i => <div key={i} className={`w-2 h-2 rounded-full ${i === 0 ? 'bg-[#2F7BF6]' : 'bg-[#E5E7EB]'}`} />)}
@@ -2508,6 +2488,8 @@ export default function App() {
   const [destination, setDestination] = useState<Place | null>(null)
   const [analysis, setAnalysis] = useState<AnalyzeResponse | null>(null)
   const [analyzeError, setAnalyzeError] = useState<string | null>(null)
+  const [analyzeProgress, setAnalyzeProgress] = useState(0)
+  const [analyzeStage, setAnalyzeStage] = useState('서버를 깨우는 중이에요')
   const [selectedRoute, setSelectedRoute] = useState<RouteCandidate | null>(null)
   const [departTime, setDepartTime] = useState<string | null>(null)
   const [ranking, setRanking] = useState<RankResponse | null>(null)
@@ -2618,6 +2600,8 @@ export default function App() {
   const runAnalyze = (from: Place, to: Place, when: string) => {
     const id = ++requestId.current
     setAnalyzeError(null)
+    setAnalyzeProgress(0)
+    setAnalyzeStage('서버를 깨우는 중이에요')
     setAnalysis(null)
     analysisRef.current = null
     setRanking(null)
@@ -2628,6 +2612,11 @@ export default function App() {
       { name: to.name, lat: to.lat, lng: to.lng },
       when,
       usePersonal ? routeParams : null,
+      info => {
+        if (id !== requestId.current) return
+        setAnalyzeProgress(info.progress)
+        setAnalyzeStage(info.stage)
+      },
     )
       .then(result => {
         if (id !== requestId.current) throw new Error('stale')
@@ -2702,6 +2691,8 @@ export default function App() {
     setDestination,
     analysis,
     analyzeError,
+    analyzeProgress,
+    analyzeStage,
     selectedRoute,
     setSelectedRoute,
     departTime,

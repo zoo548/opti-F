@@ -77,6 +77,48 @@ const TRANSIT_PILL = '#3B82F6'
 const TAXI_PILL = '#FB6B3C'
 const WALK_PILL = '#9CA3AF'
 
+function apiGet<T>(path: string, timeoutMs = 20_000): Promise<T> {
+  const baseURL = import.meta.env.VITE_BACKEND_URL
+  if (!baseURL) {
+    return Promise.reject(new Error('VITE_BACKEND_URL이 설정되지 않았습니다'))
+  }
+
+  const controller = new AbortController()
+  const timer = window.setTimeout(() => controller.abort(), timeoutMs)
+
+  return fetch(`${baseURL.replace(/\/$/, '')}${path}`, {
+    method: 'GET',
+    signal: controller.signal,
+  })
+    .then(async response => {
+      if (!response.ok) {
+        let detail = `서버 오류 (${response.status})`
+        try {
+          const parsed = await response.json()
+          if (typeof parsed?.detail === 'string') detail = parsed.detail
+        } catch {
+          /* ignore */
+        }
+        throw new Error(detail)
+      }
+      return response.json() as Promise<T>
+    })
+    .catch(error => {
+      if (error instanceof DOMException && error.name === 'AbortError') {
+        throw new Error('요청 시간이 초과되었습니다. 다시 시도해 주세요.')
+      }
+      if (error instanceof TypeError) {
+        throw new Error('서버에 연결할 수 없습니다. 백엔드가 실행 중인지 확인해 주세요.')
+      }
+      throw error
+    })
+    .finally(() => window.clearTimeout(timer))
+}
+
+function sleep(ms: number) {
+  return new Promise(resolve => window.setTimeout(resolve, ms))
+}
+
 function apiPost<T>(path: string, body: unknown, timeoutMs = 90_000): Promise<T> {
   const baseURL = import.meta.env.VITE_BACKEND_URL
   if (!baseURL) {
@@ -181,15 +223,46 @@ export type EstimateResponse = {
   route_params: RouteParams
 }
 
+export type AnalyzeJobStatus = {
+  status: 'running' | 'done' | 'error'
+  progress: number
+  stage: string
+  result: AnalyzeResponse | null
+  error?: string | null
+}
+
 export function analyzeRoutes(
   origin: PlaceInput,
   dest: PlaceInput,
   departTime?: string,
   params?: RouteParams | null,
+  onProgress?: (info: { progress: number; stage: string }) => void,
 ): Promise<AnalyzeResponse> {
   const body: Record<string, unknown> = { origin, dest, departTime }
   if (params) body.params = params
-  return apiPost<AnalyzeResponse>('/routes/analyze', body)
+
+  return (async () => {
+    const job = await apiPost<{ job_id: string }>('/routes/analyze/jobs', body, 20_000)
+    const deadline = Date.now() + 180_000
+    while (true) {
+      const status = await apiGet<AnalyzeJobStatus>(`/routes/analyze/jobs/${job.job_id}`)
+      onProgress?.({
+        progress: Number(status.progress) || 0,
+        stage: status.stage || '서버를 깨우는 중이에요',
+      })
+      if (status.status === 'done') {
+        if (!status.result) throw new Error('분석 결과가 없습니다.')
+        return status.result
+      }
+      if (status.status === 'error') {
+        throw new Error(status.error || '경로 분석에 실패했습니다.')
+      }
+      if (Date.now() > deadline) {
+        throw new Error('요청 시간이 초과되었습니다. 다시 시도해 주세요.')
+      }
+      await sleep(2000)
+    }
+  })()
 }
 
 export function createSurvey(input: {
