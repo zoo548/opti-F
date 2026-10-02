@@ -39,9 +39,13 @@ type TripContextValue = {
   ranking: RankResponse | null
   rankError: string | null
   rankingBusy: boolean
+  pendingLimits: RankLimits | null
+  appliedLimits: RankLimits | null
+  setPendingLimits: (limits: RankLimits | null) => void
   startAnalyze: (origin: Place, destination: Place) => void
   retryAnalyze: () => void
-  applyRank: (limits: RankLimits) => Promise<void>
+  waitForAnalyze: () => Promise<AnalyzeResponse>
+  applyRank: (limits: RankLimits, candidates?: RouteCandidate[]) => Promise<void>
   clearRanking: () => void
 }
 
@@ -194,6 +198,26 @@ function overHint(over?: RankOver | null) {
   if (over.cost_krw && over.cost_krw > 0) parts.push(`요금 +${fmt(Math.round(over.cost_krw))}원`)
   if (over.transfers && over.transfers > 0) parts.push(`환승 +${Math.round(over.transfers)}회`)
   return parts.length ? `희망 조건보다 ${parts.join(', ')}` : ''
+}
+
+function limitsSummary(limits: RankLimits | null) {
+  if (!limits) return ''
+  const parts: string[] = []
+  if (limits.max_time_min != null) parts.push(`시간 ${Math.round(limits.max_time_min)}분 이하`)
+  if (limits.max_cost_krw != null) parts.push(`요금 ${fmt(Math.round(limits.max_cost_krw))}원 이하`)
+  if (limits.max_transfers != null) parts.push(`환승 ${Math.round(limits.max_transfers)}회 이하`)
+  if (limits.arrive_by) parts.push(`도착 ${clockLabel(limits.arrive_by)}까지`)
+  return parts.join(' · ')
+}
+
+function hasLimits(limits: RankLimits | null | undefined) {
+  if (!limits) return false
+  return (
+    limits.max_time_min != null ||
+    limits.max_cost_krw != null ||
+    limits.max_transfers != null ||
+    Boolean(limits.arrive_by)
+  )
 }
 
 function rangeHint(low?: { label: string; value: string }, high?: { label: string; value: string }) {
@@ -878,7 +902,7 @@ function HomeScreen({ onNav }: { onNav: (s: Screen) => void }) {
               trip.setOrigin(origin)
               trip.setDestination(destination)
               trip.startAnalyze(origin, destination)
-              onNav('analyzing')
+              onNav('reservation')
             }}
             className={`w-full py-4 mt-4 rounded-xl text-[16px] font-semibold ${
               canSearch ? 'bg-[#2F7BF6] text-white' : 'bg-[#E5E7EB] text-[#9CA3AF]'
@@ -1584,6 +1608,31 @@ function AnalyzingScreen({ onNav }: { onNav: (s: Screen) => void }) {
   const trip = useTrip()
   const [progress, setProgress] = useState(12)
   const [waking, setWaking] = useState(false)
+  const finishing = useRef(false)
+
+  const finishSearch = () => {
+    if (finishing.current) return
+    finishing.current = true
+    trip
+      .waitForAnalyze()
+      .then(async data => {
+        const limits = trip.pendingLimits
+        if (hasLimits(limits) && limits) {
+          await trip.applyRank(limits, data.candidates)
+        } else {
+          trip.clearRanking()
+        }
+        onNav('results')
+      })
+      .catch(() => {
+        finishing.current = false
+      })
+  }
+
+  useEffect(() => {
+    finishSearch()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   useEffect(() => {
     if (trip.analyzeError || trip.analysis) return
@@ -1604,15 +1653,10 @@ function AnalyzingScreen({ onNav }: { onNav: (s: Screen) => void }) {
     return () => window.clearInterval(iv)
   }, [trip.analyzeError, trip.analysis])
 
-  useEffect(() => {
-    if (!trip.analysis) return
-    const t = window.setTimeout(() => onNav('results'), 350)
-    return () => window.clearTimeout(t)
-  }, [trip.analysis, onNav])
-
   const r = 52, circ = 2 * Math.PI * r
   const offset = circ * (1 - progress / 100)
-  const loading = !trip.analyzeError
+  const failed = Boolean(trip.analyzeError || trip.rankError)
+  const loading = !failed
 
   return (
     <div className="flex flex-col h-full bg-white">
@@ -1649,13 +1693,17 @@ function AnalyzingScreen({ onNav }: { onNav: (s: Screen) => void }) {
           </>
         )}
 
-        {trip.analyzeError && (
+        {failed && (
           <div className="w-full mb-8 text-center">
             <div className="text-[17px] font-semibold text-[#111827] mb-2">경로를 불러오지 못했어요</div>
-            <div className="text-[13px] text-[#6B7280] mb-6 leading-relaxed">{trip.analyzeError}</div>
+            <div className="text-[13px] text-[#6B7280] mb-6 leading-relaxed">{trip.analyzeError || trip.rankError}</div>
             <button
               type="button"
-              onClick={() => trip.retryAnalyze()}
+              onClick={() => {
+                if (trip.analyzeError) trip.retryAnalyze()
+                finishing.current = false
+                finishSearch()
+              }}
               className="w-full py-4 mb-3 bg-[#2F7BF6] rounded-xl text-white font-semibold text-[15px]"
             >
               다시 시도
@@ -1763,19 +1811,18 @@ function ResultsScreen({ onNav }: { onNav: (s: Screen) => void }) {
         </div>
       </div>
 
-      <div className="flex items-center justify-between px-4 py-2 border-b border-[#F3F4F6]">
+        <div className="flex items-center justify-between px-4 py-2 border-b border-[#F3F4F6]">
         <div className="flex items-center gap-1 text-[12px] text-[#374151]">
           <span>{clockLabel(trip.departTime)} 출발</span>
           <svg width="10" height="10" viewBox="0 0 10 10" fill="none"><path d="M2 4l3 3 3-3" stroke="#374151" strokeWidth="1.2"/></svg>
         </div>
-        <div className="flex items-center gap-1 text-[12px] text-[#374151]">
-          {trip.ranking && (
-            <button type="button" onClick={() => trip.clearRanking()} className="mr-2">
-              조건 초기화
-            </button>
-          )}
-          <button type="button" onClick={() => onNav('reservation')}>조건 설정</button>
-        </div>
+        <button
+          type="button"
+          onClick={() => onNav('reservation')}
+          className="max-w-[70%] truncate rounded-full bg-[#EAF2FF] px-3 py-1 text-[12px] font-semibold text-[#2F7BF6]"
+        >
+          {limitsSummary(trip.appliedLimits) || '조건 없음'}
+        </button>
       </div>
 
       <div className="flex-1 overflow-y-auto pb-20">
@@ -2008,6 +2055,7 @@ function ReservationScreen({ onNav }: { onNav: (s: Screen) => void }) {
   type Condition = 'time' | 'cost' | 'transfer' | 'duration'
   type Strictness = 'low' | 'medium' | 'high'
   const trip = useTrip()
+  const seed = trip.appliedLimits || trip.pendingLimits
   const candidates = trip.analysis?.candidates ?? []
   const taxiOnly = candidates.find(item => item.type === 'TT')
   const transitOnly = candidates.find(item => item.type === 'PP')
@@ -2028,12 +2076,12 @@ function ReservationScreen({ onNav }: { onNav: (s: Screen) => void }) {
     transitOnly ? { label: '대중교통만', value: arrivalLabel(trip.departTime, transitOnly.total_time) } : undefined,
   )
 
-  const [arrivalTime, setArrivalTime] = useState(() => clockLabel(trip.departTime))
+  const [arrivalTime, setArrivalTime] = useState(() => seed?.arrive_by ? clockLabel(seed.arrive_by) : clockLabel(trip.departTime))
   const [quickTime, setQuickTime] = useState('직접 입력')
-  const [maxTime, setMaxTime] = useState('')
+  const [maxTime, setMaxTime] = useState(seed?.max_time_min != null ? String(Math.round(seed.max_time_min)) : '')
   const [minCost, setMinCost] = useState(5000)
-  const [maxCost, setMaxCost] = useState(20000)
-  const [transferLimit, setTransferLimit] = useState(2)
+  const [maxCost, setMaxCost] = useState(seed?.max_cost_krw != null ? Number(seed.max_cost_krw) : 20000)
+  const [transferLimit, setTransferLimit] = useState(seed?.max_transfers != null ? Number(seed.max_transfers) : 2)
   const [strictness, setStrictness] = useState<Record<Condition, Strictness>>({
     time: 'medium',
     cost: 'medium',
@@ -2041,10 +2089,10 @@ function ReservationScreen({ onNav }: { onNav: (s: Screen) => void }) {
     duration: 'medium',
   })
   const [enabled, setEnabled] = useState<Record<Condition, boolean>>({
-    time: false,
-    cost: false,
-    transfer: false,
-    duration: false,
+    time: Boolean(seed?.arrive_by),
+    cost: seed?.max_cost_krw != null,
+    transfer: seed?.max_transfers != null,
+    duration: seed?.max_time_min != null,
   })
 
   const strictnessOptions: { value: Strictness; label: string }[] = [
@@ -2127,11 +2175,31 @@ function ReservationScreen({ onNav }: { onNav: (s: Screen) => void }) {
     )
   }
 
+  const collectLimits = (): RankLimits | null => {
+    const limits: RankLimits = {}
+    if (enabled.duration && maxTime.trim()) limits.max_time_min = Number(maxTime)
+    if (enabled.cost) limits.max_cost_krw = maxCost
+    if (enabled.transfer) limits.max_transfers = transferLimit
+    if (enabled.time) limits.arrive_by = arrivalToIso(trip.departTime, arrivalTime)
+    return hasLimits(limits) ? limits : null
+  }
+
   return (
     <div className="flex h-full flex-col bg-[#F5F7FA]">
-      <NavHeader title="희망 조건 설정" onBack={() => onNav('results')} />
+      <NavHeader title="희망 조건 설정" onBack={() => onNav('home')} />
 
       <div className="flex-1 space-y-3 overflow-y-auto px-5 pb-4 pt-4">
+        <div className="rounded-2xl bg-white p-4 shadow-[0_2px_14px_rgba(15,23,42,0.05)]">
+          <div className="flex items-center gap-2">
+            <div className="w-2.5 h-2.5 rounded-full border-2 border-[#9CA3AF]" />
+            <span className="text-[13px] text-[#374151] truncate">{trip.origin?.name ?? '출발지'}</span>
+          </div>
+          <div className="ml-1.5 w-0.5 h-4 bg-[#E5E7EB]" />
+          <div className="flex items-center gap-2">
+            <div className="w-2.5 h-2.5 rounded-full bg-[#2F7BF6]" />
+            <span className="text-[13px] text-[#374151] truncate">{trip.destination?.name ?? '도착지'}</span>
+          </div>
+        </div>
         <div className="rounded-2xl bg-white p-4 shadow-[0_2px_14px_rgba(15,23,42,0.05)]">
           <div className="flex items-center gap-2">
             <span className="flex-1 text-[15px] font-semibold text-[#182230]">도착 시간</span>
@@ -2312,18 +2380,23 @@ function ReservationScreen({ onNav }: { onNav: (s: Screen) => void }) {
         )}
         <button
           type="button"
-          disabled={trip.rankingBusy || !trip.analysis}
           onClick={() => {
-            const limits: RankLimits = {}
-            if (enabled.duration && maxTime.trim()) limits.max_time_min = Number(maxTime)
-            if (enabled.cost) limits.max_cost_krw = maxCost
-            if (enabled.transfer) limits.max_transfers = transferLimit
-            if (enabled.time) limits.arrive_by = arrivalToIso(trip.departTime, arrivalTime)
-            trip.applyRank(limits).then(() => onNav('results')).catch(() => {})
+            trip.setPendingLimits(collectLimits())
+            onNav('analyzing')
           }}
-          className="h-14 w-full rounded-[14px] bg-[#2F7BF6] text-[16px] font-bold text-white shadow-[0_8px_20px_rgba(47,123,246,0.24)] disabled:opacity-60"
+          className="h-14 w-full rounded-[14px] bg-[#2F7BF6] text-[16px] font-bold text-white shadow-[0_8px_20px_rgba(47,123,246,0.24)]"
         >
-          이 조건으로 경로 추천 받기 →
+          이 조건으로 찾기
+        </button>
+        <button
+          type="button"
+          onClick={() => {
+            trip.setPendingLimits(null)
+            onNav('analyzing')
+          }}
+          className="mt-3 h-12 w-full rounded-[14px] border border-[#E5E7EB] bg-white text-[14px] font-medium text-[#6B7280]"
+        >
+          조건 없이 찾기
         </button>
       </div>
     </div>
@@ -2438,8 +2511,12 @@ export default function App() {
   const [ranking, setRanking] = useState<RankResponse | null>(null)
   const [rankError, setRankError] = useState<string | null>(null)
   const [rankingBusy, setRankingBusy] = useState(false)
+  const [pendingLimits, setPendingLimits] = useState<RankLimits | null>(null)
+  const [appliedLimits, setAppliedLimits] = useState<RankLimits | null>(null)
   const requestId = useRef(0)
   const estimateId = useRef(0)
+  const analysisRef = useRef<AnalyzeResponse | null>(null)
+  const analyzePromiseRef = useRef<Promise<AnalyzeResponse> | null>(null)
 
   const storedProfile = readStorage<SpProfile>(PROFILE_KEY)
   const [survey, setSurvey] = useState<SurveyResponse | null>(null)
@@ -2540,22 +2617,31 @@ export default function App() {
     const id = ++requestId.current
     setAnalyzeError(null)
     setAnalysis(null)
+    analysisRef.current = null
     setRanking(null)
     setRankError(null)
-    analyzeRoutes(
+    setAppliedLimits(null)
+    const request = analyzeRoutes(
       { name: from.name, lat: from.lat, lng: from.lng },
       { name: to.name, lat: to.lat, lng: to.lng },
       when,
       usePersonal ? routeParams : null,
     )
       .then(result => {
-        if (id !== requestId.current) return
+        if (id !== requestId.current) throw new Error('stale')
+        analysisRef.current = result
         setAnalysis(result)
+        return result
       })
       .catch(error => {
-        if (id !== requestId.current) return
-        setAnalyzeError(error instanceof Error ? error.message : '경로 분석에 실패했습니다.')
+        if (id !== requestId.current) throw error
+        if (error instanceof Error && error.message === 'stale') throw error
+        const message = error instanceof Error ? error.message : '경로 분석에 실패했습니다.'
+        setAnalyzeError(message)
+        throw error instanceof Error ? error : new Error(message)
       })
+    analyzePromiseRef.current = request
+    void request.catch(() => undefined)
   }
 
   const startAnalyze = (from: Place, to: Place) => {
@@ -2574,16 +2660,24 @@ export default function App() {
     runAnalyze(origin, destination, when)
   }
 
-  const applyRank = async (limits: RankLimits) => {
-    if (!analysis) {
+  const waitForAnalyze = () => {
+    if (analysisRef.current) return Promise.resolve(analysisRef.current)
+    if (analyzePromiseRef.current) return analyzePromiseRef.current
+    return Promise.reject(new Error('경로 분석이 시작되지 않았습니다.'))
+  }
+
+  const applyRank = async (limits: RankLimits, candidates?: RouteCandidate[]) => {
+    const source = candidates ?? analysisRef.current?.candidates
+    if (!source) {
       setRankError('먼저 경로를 찾아 주세요.')
       throw new Error('no analysis')
     }
     setRankingBusy(true)
     setRankError(null)
     try {
-      const result = await rankRoutes(analysis.candidates, limits)
+      const result = await rankRoutes(source, limits)
       setRanking(result)
+      setAppliedLimits(limits)
     } catch (error) {
       const message = error instanceof Error ? error.message : '조건 적용에 실패했습니다.'
       setRankError(message)
@@ -2596,6 +2690,7 @@ export default function App() {
   const clearRanking = () => {
     setRanking(null)
     setRankError(null)
+    setAppliedLimits(null)
   }
 
   const trip: TripContextValue = {
@@ -2611,8 +2706,12 @@ export default function App() {
     ranking,
     rankError,
     rankingBusy,
+    pendingLimits,
+    appliedLimits,
+    setPendingLimits,
     startAnalyze,
     retryAnalyze,
+    waitForAnalyze,
     applyRank,
     clearRanking,
   }
