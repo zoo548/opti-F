@@ -823,17 +823,24 @@ function HomeScreen({ onNav }: { onNav: (s: Screen) => void }) {
   return (
     <div className="flex min-h-dvh flex-col bg-white">
       <div className="flex-1 overflow-y-auto pb-[88px]">
-        <div className="flex flex-shrink-0 flex-col items-center px-6 pt-8">
-          <div className="flex items-center gap-2 text-[32px] font-bold text-[#2F7BF6] tracking-tight">
-            <span>OPTI</span>
-            <img src="/opti-logo.png" alt="" className="h-12 w-12 rounded-xl" />
-          </div>
+        <div className="flex flex-shrink-0 flex-col items-center px-6 pt-14">
+          <div className="text-[32px] font-bold text-[#2F7BF6] tracking-tight">OPTI</div>
           <div className="text-[13px] text-[#6B7280] mt-1">대중교통·택시 환승경로 탐색 서비스</div>
         </div>
 
         <div className="flex flex-shrink-0 flex-col gap-0 px-5 pt-8">
           <div ref={searchBoxRef} className="relative z-20 bg-white border border-[#E5E7EB] rounded-2xl shadow-sm overflow-visible">
-            <div className="relative flex items-center gap-3 px-4 py-3.5 border-b border-[#F3F4F6]">
+            <button
+              type="button"
+              onClick={swapPlaces}
+              className="absolute right-3 top-1/2 z-30 -translate-y-1/2 text-[#9CA3AF]"
+              aria-label="출발지와 도착지 바꾸기"
+            >
+              <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
+                <path d="M9 3v12M5 7l4-4 4 4M5 11l4 4 4-4" stroke="#9CA3AF" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+              </svg>
+            </button>
+            <div className="relative flex items-center gap-3 px-4 py-3.5 pr-12 border-b border-[#F3F4F6]">
               <div className="w-2.5 h-2.5 rounded-full border-2 border-[#9CA3AF] flex-shrink-0" />
               <input
                 className="flex-1 text-[14px] text-[#374151] outline-none placeholder-[#9CA3AF] bg-transparent"
@@ -845,11 +852,6 @@ function HomeScreen({ onNav }: { onNav: (s: Screen) => void }) {
                   setOrigin(null)
                 }}
               />
-              <button type="button" onClick={swapPlaces} className="flex-shrink-0 text-[#9CA3AF]" aria-label="출발지와 도착지 바꾸기">
-                <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
-                  <path d="M9 3v12M5 7l4-4 4 4M5 11l4 4 4-4" stroke="#9CA3AF" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
-                </svg>
-              </button>
               {activeField === 'origin' && (
                 <PlaceSuggestList
                   query={originQuery}
@@ -864,7 +866,7 @@ function HomeScreen({ onNav }: { onNav: (s: Screen) => void }) {
                 />
               )}
             </div>
-            <div className="relative flex items-center gap-3 px-4 py-3.5">
+            <div className="relative flex items-center gap-3 px-4 py-3.5 pr-12">
               <div className="w-2.5 h-2.5 rounded-full bg-[#2F7BF6] flex-shrink-0" />
               <input
                 className="flex-1 text-[14px] text-[#374151] outline-none placeholder-[#9CA3AF] bg-transparent"
