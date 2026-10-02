@@ -2507,7 +2507,7 @@ export default function App() {
     try {
       const result = await estimateProfile(survey.survey_token, responses)
       if (id !== estimateId.current) return
-      const softMix = Boolean(result.trap_failed || (result.quality_warnings && result.quality_warnings.length > 0))
+      const softMix = Boolean(result.quality_warnings && result.quality_warnings.length > 0)
       const savedProfile: SpProfile = {
         ...result.profile,
         display_age: displayAge,

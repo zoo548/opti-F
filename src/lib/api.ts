@@ -177,7 +177,7 @@ export type SpProfile = {
 export type EstimateResponse = {
   profile: SpProfile
   quality_warnings: string[]
-  trap_failed: boolean
+  trap_failed?: boolean
   route_params: RouteParams
 }
 

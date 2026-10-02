@@ -1046,12 +1046,10 @@ def _per_block_from_length(length: int) -> int:
     raise ValueError("문항 수는 6, 12, 24 중 하나여야 합니다.")
 
 
-def _build_sequence(use_case: str, per_block: int, version: int, trap_position: int):
+def _build_sequence(use_case: str, per_block: int, version: int, trap_position: int | None = None):
     full = build_tasks(use_case)
     tasks = select_subset(full, per_block, version)
-    trap_task = build_trap_task(use_case)
-    sequence = list(tasks[:trap_position]) + [trap_task] + list(tasks[trap_position:])
-    return tasks, trap_task, sequence
+    return tasks, None, list(tasks)
 
 
 def _serialize_alternative(index: int, alternative: Alternative) -> dict:
@@ -1122,14 +1120,10 @@ def create_survey(age_group, purpose, vot_direct, length) -> dict:
     version = random.randrange(group_count)
     full = build_tasks(use_case)
     tasks = select_subset(full, per_block, version)
-    trap_task = build_trap_task(use_case)
-    trap_position = len(tasks) // 2
-    sequence = list(tasks[:trap_position]) + [trap_task] + list(tasks[trap_position:])
     token = _encode_token({
         "use_case": use_case,
         "per_block": per_block,
         "version": version,
-        "trap_position": trap_position,
         "age_group": age,
         "purpose": mapped_purpose,
         "vot_direct": vot,
@@ -1137,7 +1131,7 @@ def create_survey(age_group, purpose, vot_direct, length) -> dict:
     return {
         "survey_token": token,
         "scenario_text": SCENARIO_TEXT[use_case],
-        "cards": [_serialize_card(number, task) for number, task in enumerate(sequence, start=1)],
+        "cards": [_serialize_card(number, task) for number, task in enumerate(tasks, start=1)],
     }
 
 
@@ -1146,27 +1140,23 @@ def estimate_profile(survey_token: str, responses: list[int]) -> dict:
     use_case = payload["use_case"]
     per_block = int(payload["per_block"])
     version = int(payload["version"])
-    trap_position = int(payload["trap_position"])
     age_group = payload["age_group"]
     purpose = payload["purpose"]
     vot_direct = float(payload["vot_direct"])
-    tasks, trap_task, sequence = _build_sequence(use_case, per_block, version, trap_position)
+    tasks, _, sequence = _build_sequence(use_case, per_block, version)
     if len(responses) != len(sequence):
         raise ValueError(f"응답 수가 문항 수와 다릅니다. ({len(responses)}/{len(sequence)})")
-    choices_raw = [int(x) for x in responses]
-    trap_choice = choices_raw[trap_position]
-    choices = choices_raw[:trap_position] + choices_raw[trap_position + 1:]
+    choices = [int(x) for x in responses]
     outcome = estimate(tasks, choices, vot_direct, fix_vot=FIX_VOT_TO_STATED)
     profile = _assemble_profile(
         2, age_group, purpose, use_case, vot_direct,
         outcome["parameters"], outcome["posterior_sd"], outcome["inactive"],
     )
-    quality_warnings = response_quality(tasks, choices, (trap_task, trap_choice))
-    trap_failed = trap_is_failed(trap_task, trap_choice)
+    quality_warnings = response_quality(tasks, choices, None)
     return {
         "profile": asdict(profile),
         "quality_warnings": quality_warnings,
-        "trap_failed": bool(trap_failed),
+        "trap_failed": False,
         "route_params": _route_params(outcome["parameters"], outcome["inactive"]),
     }
 
