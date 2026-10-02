@@ -233,7 +233,9 @@ ODSAY_ERRORS = {}      # {오류문구: 발생횟수}  — 한도 초과 등을 
 
 
 def _odsay_headers():
-    referer = os.environ.get("ODSAY_REFERER", "").strip() or "http://localhost"
+    referer = os.environ.get("ODSAY_REFERER", "").strip()
+    if not referer:
+        return {}
     return {"Referer": referer}
 
 
