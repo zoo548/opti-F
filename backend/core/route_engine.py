@@ -232,12 +232,21 @@ def split_subway_congestion(seg, start_dt, cong, threshold=CONGESTION_THRESHOLD)
 ODSAY_ERRORS = {}      # {오류문구: 발생횟수}  — 한도 초과 등을 마지막에 요약
 
 
+def _odsay_headers():
+    referer = os.environ.get("ODSAY_REFERER", "").strip() or "http://localhost"
+    return {"Referer": referer}
+
+
 def _odsay_error(js):
     err = js.get("error") if isinstance(js, dict) else None
     if isinstance(err, list) and err:
         err = err[0]
     if isinstance(err, dict):
-        return f"code={err.get('code')} {err.get('msg')}"
+        code = err.get("code")
+        msg = err.get("message") or err.get("msg")
+        parts = [f"code={code}" if code is not None else None,
+                 str(msg) if msg else None]
+        return " ".join(p for p in parts if p) or None
     return None
 
 
@@ -247,12 +256,15 @@ def _note_odsay_error(where, msg):
 
 
 def odsay_paths_raw(odsay_key, s_lat, s_lon, e_lat, e_lon):
+    if not (odsay_key or "").strip():
+        _note_odsay_error("searchPubTransPathT", "ODSAY_API_KEY 없음")
+        return []
     try:
         res = requests.get(
             "https://api.odsay.com/v1/api/searchPubTransPathT",
             params={"apiKey": odsay_key, "SX": str(s_lon), "SY": str(s_lat),
                     "EX": str(e_lon), "EY": str(e_lat), "SearchPathType": 0},
-            headers={"Referer": "http://localhost"}, timeout=10)
+            headers=_odsay_headers(), timeout=10)
         js = res.json()
         err = _odsay_error(js)
         if err:
@@ -284,10 +296,14 @@ def odsay_lanes(odsay_key, map_obj):
         return _LANE_CACHE[map_obj]
     lanes = []
     try:
+        if not (odsay_key or "").strip():
+            _note_odsay_error("loadLane", "ODSAY_API_KEY 없음")
+            _LANE_CACHE[map_obj] = []
+            return []
         res = requests.get(
             "https://api.odsay.com/v1/api/loadLane",
             params={"apiKey": odsay_key, "mapObject": f"0:0@{map_obj}"},
-            headers={"Referer": "http://localhost"}, timeout=15)
+            headers=_odsay_headers(), timeout=15)
         js = res.json()
         err = _odsay_error(js)
         if err:
