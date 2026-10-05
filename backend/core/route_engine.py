@@ -16,6 +16,16 @@ import numpy as np
 import pandas as pd
 import requests
 
+from .api_cache import (
+    TTL_LANE_SEC,
+    TTL_ODSAY_SEC,
+    TTL_TMAP_SEC,
+    bump,
+    cache_get,
+    cache_set,
+    reset_stats,
+    snapshot_stats,
+)
 from .congestion_io import load_congestion_sheets, resolve_congestion_path
 
 log = logging.getLogger(__name__)
@@ -258,6 +268,15 @@ def _odsay_error(js):
     return None
 
 
+def _odsay_error_code(js):
+    err = js.get("error") if isinstance(js, dict) else None
+    if isinstance(err, list) and err:
+        err = err[0]
+    if isinstance(err, dict) and err.get("code") is not None:
+        return str(err.get("code"))
+    return None
+
+
 def _note_odsay_error(where, msg):
     key = f"{where}: {msg}"
     with _ODSAY_ERR_LOCK:
@@ -303,20 +322,28 @@ def odsay_lanes(odsay_key, map_obj):
         return []
     if map_obj in _LANE_CACHE:
         return _LANE_CACHE[map_obj]
+    pkey = f"lane:{map_obj}"
+    cached = cache_get(pkey)
+    if cached is not None:
+        lanes = _lanes_from_cache(cached)
+        _LANE_CACHE[map_obj] = lanes
+        return lanes
     lanes = []
+    cacheable = False
     try:
         if not (odsay_key or "").strip():
             _note_odsay_error("loadLane", "ODSAY_API_KEY 없음")
             _LANE_CACHE[map_obj] = []
             return []
+        bump("lane_api")
         res = requests.get(
             "https://api.odsay.com/v1/api/loadLane",
             params={"apiKey": odsay_key, "mapObject": f"0:0@{map_obj}"},
             headers=_odsay_headers(), timeout=15)
         js = res.json()
         err = _odsay_error(js)
-        if err:
-            _note_odsay_error("loadLane", err)
+        if err or _odsay_error_code(js) == "-98":
+            _note_odsay_error("loadLane", err or "code=-98")
         elif "result" not in js:
             _note_odsay_error("loadLane", f"HTTP {res.status_code} / result 없음")
         else:
@@ -329,8 +356,12 @@ def odsay_lanes(odsay_key, map_obj):
                               "coords": coords})
             if not lanes:
                 _note_odsay_error("loadLane", "lane 배열이 비어 있음")
+            else:
+                cacheable = True
     except Exception as e:
         _note_odsay_error("loadLane", type(e).__name__)
+    if cacheable:
+        cache_set(pkey, "odsay", _lanes_to_cache(lanes), TTL_LANE_SEC)
     _LANE_CACHE[map_obj] = lanes
     return lanes
 
@@ -487,7 +518,7 @@ def hydrate_geometry(odsay_key, geoms, ids, verbose=True):
       없음          : 형상도 정류장도 없음 → 지도에 안 그려짐
     """
     stats = {}
-    n_call = 0
+    before_lane = snapshot_stats()["lane_api"]
     for _id in ids:
         g = geoms.get(_id)
         if not g:
@@ -497,10 +528,7 @@ def hydrate_geometry(odsay_key, geoms, ids, verbose=True):
         if not segs:
             continue
 
-        before = len(_LANE_CACHE)
         lanes = odsay_lanes(odsay_key, map_obj) if map_obj else []
-        if len(_LANE_CACHE) > before:
-            n_call += 1
 
         used, pos = [False] * len(lanes), 0
         for sg in segs:
@@ -529,6 +557,7 @@ def hydrate_geometry(odsay_key, geoms, ids, verbose=True):
             stats[key] = stats.get(key, 0) + 1
 
     if verbose:
+        n_call = snapshot_stats()["lane_api"] - before_lane
         total = sum(stats.values())
         log.info(f"  형상 수집: loadLane {n_call}회 호출 / 구간 {total}개")
         for k in ("lane", "lane(위치매칭)", "정류장직선", "없음"):
@@ -552,41 +581,121 @@ def _parse_tmap(js):
     return props.get("totalTime", 0) / 60, props.get("taxiFare", 0), to_wgs84(coords)
 
 
+_TMAP_PRED_LOCK = threading.Lock()
+_TMAP_PREDICTION_UNAVAILABLE = False
+
+
+def _parse_depart_iso(depart_iso):
+    if not depart_iso:
+        return None
+    text = str(depart_iso).strip()
+    if len(text) >= 5 and (text[-5] in "+-") and text[-3] != ":":
+        text = text[:-2] + ":" + text[-2:]
+    text = text.replace("Z", "+00:00")
+    try:
+        return datetime.fromisoformat(text)
+    except ValueError:
+        return None
+
+
+def _depart_near_now(depart_iso, window_sec=30 * 60):
+    dt = _parse_depart_iso(depart_iso)
+    if dt is None:
+        return True
+    now = datetime.now(dt.tzinfo) if dt.tzinfo else datetime.now()
+    return abs((dt - now).total_seconds()) <= window_sec
+
+
+def _tmap_pred_unavailable():
+    with _TMAP_PRED_LOCK:
+        return _TMAP_PREDICTION_UNAVAILABLE
+
+
+def _mark_tmap_pred_unavailable():
+    global _TMAP_PREDICTION_UNAVAILABLE
+    with _TMAP_PRED_LOCK:
+        _TMAP_PREDICTION_UNAVAILABLE = True
+
+
+def _tmap_error_info(resp):
+    code = None
+    msg = ""
+    try:
+        js = resp.json()
+        err = js.get("error") if isinstance(js, dict) else None
+        if isinstance(err, dict):
+            code = str(err.get("code") or err.get("id") or "")
+            msg = str(err.get("message") or err.get("msg") or "")
+    except Exception:
+        msg = (resp.text or "")[:180]
+    return code, msg
+
+
+def _tmap_auth_or_unsupported(status, code, msg):
+    if status in (401, 403, 402):
+        return True
+    text = f"{code} {msg}"
+    lower = text.lower()
+    return any(n in lower for n in ("unauthorized", "not supported", "forbidden", "not authorized")) or any(
+        n in text for n in ("권한", "미지원")
+    )
+
+
+def _tmap_live(tmap_key, s_lat, s_lon, e_lat, e_lon):
+    r = requests.post(
+        "https://apis.openapi.sk.com/tmap/routes?version=1&format=json",
+        headers={"appKey": tmap_key},
+        data={"startX": str(s_lon), "startY": str(s_lat),
+              "endX": str(e_lon), "endY": str(e_lat),
+              "reqCoordType": "WGS84GEO", "resCoordType": "WGS84GEO"}, timeout=8)
+    if r.status_code == 200:
+        minutes, fare, coords = _parse_tmap(r.json())
+        return minutes, fare, coords, "live"
+    return None, None, [], None
+
+
 def tmap_taxi(tmap_key, s_lat, s_lon, e_lat, e_lon, depart_iso):
     """※ 반환 시간은 '주행시간'이며 호출·배차 대기시간은 포함하지 않는다.
 
     네 번째 값은 경로 출처:
       prediction : TMAP 타임머신(지정 출발 시각)
-      live       : 현재 시각 기준 일반 경로 (예측 실패 시 폴백)
+      live       : 현재 시각 기준 일반 경로 (가까운 출발이거나 예측 생략)
+      live_fallback : 예측 실패 후 실시간
       None       : 실패
     """
+    use_prediction = not _depart_near_now(depart_iso) and not _tmap_pred_unavailable()
+    if use_prediction:
+        try:
+            r = requests.post(
+                "https://apis.openapi.sk.com/tmap/routes/prediction?version=1&format=json",
+                headers={"appKey": tmap_key, "Content-Type": "application/json"},
+                json={"routesInfo": {
+                    "departure": {"name": "출발", "lon": str(s_lon), "lat": str(s_lat)},
+                    "destination": {"name": "도착", "lon": str(e_lon), "lat": str(e_lat)},
+                    "predictionType": "departure",
+                    "predictionTime": depart_iso,
+                    "searchOption": "00",
+                }}, timeout=8)
+            if r.status_code == 200:
+                minutes, fare, coords = _parse_tmap(r.json())
+                return minutes, fare, coords, "prediction"
+            code, msg = _tmap_error_info(r)
+            log.warning("TMAP prediction HTTP %s code=%s msg=%s", r.status_code, code, msg[:120])
+            if _tmap_auth_or_unsupported(r.status_code, code, msg):
+                _mark_tmap_pred_unavailable()
+        except Exception as exc:
+            log.warning("TMAP prediction error: %s", type(exc).__name__)
+        try:
+            minutes, fare, coords, source = _tmap_live(tmap_key, s_lat, s_lon, e_lat, e_lon)
+            if source == "live":
+                return minutes, fare, coords, "live_fallback"
+            return minutes, fare, coords, source
+        except Exception:
+            return None, None, [], None
     try:
-        r = requests.post(
-            "https://apis.openapi.sk.com/tmap/routes/prediction?version=1&format=json",
-            headers={"appKey": tmap_key, "Content-Type": "application/json"},
-            json={"routesInfo": {"departure": {"lon": str(s_lon), "lat": str(s_lat)},
-                                 "destination": {"lon": str(e_lon), "lat": str(e_lat)},
-                                 "predictionType": "departure",
-                                 "predictionTime": depart_iso,
-                                 "searchOption": "0"}}, timeout=8)
-        if r.status_code == 200:
-            minutes, fare, coords = _parse_tmap(r.json())
-            return minutes, fare, coords, "prediction"
+        return _tmap_live(tmap_key, s_lat, s_lon, e_lat, e_lon)
     except Exception:
-        pass
-    try:
-        r = requests.post(
-            "https://apis.openapi.sk.com/tmap/routes?version=1&format=json",
-            headers={"appKey": tmap_key},
-            data={"startX": str(s_lon), "startY": str(s_lat),
-                  "endX": str(e_lon), "endY": str(e_lat),
-                  "reqCoordType": "WGS84GEO", "resCoordType": "WGS84GEO"}, timeout=8)
-        if r.status_code == 200:
-            minutes, fare, coords = _parse_tmap(r.json())
-            return minutes, fare, coords, "live"
-    except Exception:
-        pass
-    return None, None, [], None
+        return None, None, [], None
 
 
 # =====================================================================
@@ -602,7 +711,62 @@ def _haversine_km(lat1, lon1, lat2, lon2):
 
 
 def _coord_key(lat, lon):
-    return (round(float(lat), 5), round(float(lon), 5))
+    return (round(float(lat), 4), round(float(lon), 4))
+
+
+def _coord_token(lat, lon):
+    return f"{round(float(lat), 4):.4f},{round(float(lon), 4):.4f}"
+
+
+def _odsay_persist_key(s_lat, s_lon, e_lat, e_lon, sheet):
+    return f"odsay:{_coord_token(s_lat, s_lon)}:{_coord_token(e_lat, e_lon)}:{sheet}"
+
+
+def _tmap_persist_key(s_lat, s_lon, e_lat, e_lon, sheet, hour):
+    return f"tmap:{_coord_token(s_lat, s_lon)}:{_coord_token(e_lat, e_lon)}:{sheet}:{hour}"
+
+
+def _tmap_bucket(depart_iso, fallback_sheet, fallback_hour):
+    dt = _parse_depart_iso(depart_iso)
+    if dt is None:
+        return fallback_sheet, fallback_hour
+    naive = dt.replace(tzinfo=None) if dt.tzinfo else dt
+    return _sheet_for(naive), naive.strftime("%H")
+
+
+def _lanes_to_cache(lanes):
+    out = []
+    for lane in lanes:
+        out.append({
+            "class": lane.get("class"),
+            "coords": [list(p) for p in (lane.get("coords") or [])],
+        })
+    return out
+
+
+def _lanes_from_cache(raw):
+    lanes = []
+    for lane in raw or []:
+        lanes.append({
+            "class": lane.get("class"),
+            "coords": [tuple(p) for p in (lane.get("coords") or [])],
+        })
+    return lanes
+
+
+def _tmap_to_cache(minutes, fare, coords):
+    return {
+        "minutes": minutes,
+        "fare": fare,
+        "coords": [list(p) for p in (coords or [])],
+    }
+
+
+def _tmap_from_cache(raw):
+    if not raw:
+        return None, None, []
+    coords = [tuple(p) for p in (raw.get("coords") or [])]
+    return raw.get("minutes"), raw.get("fare"), coords
 
 
 def _resolve_max_cand(P):
@@ -652,7 +816,7 @@ class _ApiMeter:
 
     def __init__(self, time_key=None):
         self.lock = threading.Lock()
-        self.time_key = time_key
+        self.time_key = time_key or ("평일", "00")
         self.odsay_n = 0
         self.odsay_s = 0.0
         self.tmap_n = 0
@@ -662,37 +826,61 @@ class _ApiMeter:
         self.tmap_cache = {}
 
     def odsay_paths(self, odsay_key, s_lat, s_lon, e_lat, e_lon):
-        ck = (_coord_key(s_lat, s_lon), _coord_key(e_lat, e_lon), self.time_key)
+        sheet = self.time_key[0] if isinstance(self.time_key, tuple) else str(self.time_key)
+        ck = (_coord_key(s_lat, s_lon), _coord_key(e_lat, e_lon), sheet)
         with self.lock:
             hit = self.odsay_cache.get(ck)
         if hit is not None:
             return hit
+        pkey = _odsay_persist_key(s_lat, s_lon, e_lat, e_lon, sheet)
+        cached = cache_get(pkey)
+        if cached is not None:
+            with self.lock:
+                self.odsay_cache[ck] = cached
+            return cached
         t0 = time.perf_counter()
+        bump("odsay_api")
         paths = odsay_paths_raw(odsay_key, s_lat, s_lon, e_lat, e_lon)
         dt = time.perf_counter() - t0
         with self.lock:
             self.odsay_n += 1
             self.odsay_s += dt
             self.odsay_cache[ck] = paths
+        if paths:
+            cache_set(pkey, "odsay", paths, TTL_ODSAY_SEC)
         return paths
 
     def taxi(self, tmap_key, s_lat, s_lon, e_lat, e_lon, depart_iso):
-        minute_key = (depart_iso or "")[:16]
-        ck = (_coord_key(s_lat, s_lon), _coord_key(e_lat, e_lon), minute_key, self.time_key)
+        sheet, hour = _tmap_bucket(
+            depart_iso,
+            self.time_key[0] if isinstance(self.time_key, tuple) else "평일",
+            self.time_key[1] if isinstance(self.time_key, tuple) and len(self.time_key) > 1 else "00",
+        )
+        ck = (_coord_key(s_lat, s_lon), _coord_key(e_lat, e_lon), sheet, hour)
         with self.lock:
             hit = self.tmap_cache.get(ck)
         if hit is not None:
             return hit
+        pkey = _tmap_persist_key(s_lat, s_lon, e_lat, e_lon, sheet, hour)
+        cached = cache_get(pkey)
+        if cached is not None:
+            result = _tmap_from_cache(cached)
+            with self.lock:
+                self.tmap_cache[ck] = result
+            return result
         t0 = time.perf_counter()
+        bump("tmap_api")
         minutes, fare, coords, source = tmap_taxi(tmap_key, s_lat, s_lon, e_lat, e_lon, depart_iso)
         dt = time.perf_counter() - t0
         result = (minutes, fare, coords)
         with self.lock:
             self.tmap_n += 1
             self.tmap_s += dt
-            if source == "live":
+            if source == "live_fallback":
                 self.tmap_live_fallback += 1
             self.tmap_cache[ck] = result
+        if minutes is not None:
+            cache_set(pkey, "tmap", _tmap_to_cache(minutes, fare, coords), TTL_TMAP_SEC)
         return result
 
 
@@ -1210,7 +1398,7 @@ def analyze_routes(
 ) -> dict:
     """좌표가 주어진 출발/도착에 대해 복합경로·GC·파레토·Knee를 계산한다."""
     ODSAY_ERRORS.clear()
-    _LANE_CACHE.clear()
+    reset_stats()
     t_all = time.perf_counter()
 
     def report(progress, stage):
@@ -1244,6 +1432,7 @@ def analyze_routes(
             "top_knee": [],
             "anchors": {"fastest": None, "cheapest": None},
             "warnings": warnings,
+            "cache_stats": snapshot_stats(),
         }
 
     report(90, "경로를 비교하고 있어요")
@@ -1332,4 +1521,5 @@ def analyze_routes(
         "top_knee": [str(r["id"]) for r in knees],
         "anchors": {"fastest": fastest, "cheapest": cheapest},
         "warnings": warnings,
+        "cache_stats": snapshot_stats(),
     }
