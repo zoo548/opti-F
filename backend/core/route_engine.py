@@ -553,7 +553,13 @@ def _parse_tmap(js):
 
 
 def tmap_taxi(tmap_key, s_lat, s_lon, e_lat, e_lon, depart_iso):
-    """※ 반환 시간은 '주행시간'이며 호출·배차 대기시간은 포함하지 않는다."""
+    """※ 반환 시간은 '주행시간'이며 호출·배차 대기시간은 포함하지 않는다.
+
+    네 번째 값은 경로 출처:
+      prediction : TMAP 타임머신(지정 출발 시각)
+      live       : 현재 시각 기준 일반 경로 (예측 실패 시 폴백)
+      None       : 실패
+    """
     try:
         r = requests.post(
             "https://apis.openapi.sk.com/tmap/routes/prediction?version=1&format=json",
@@ -564,7 +570,8 @@ def tmap_taxi(tmap_key, s_lat, s_lon, e_lat, e_lon, depart_iso):
                                  "predictionTime": depart_iso,
                                  "searchOption": "0"}}, timeout=8)
         if r.status_code == 200:
-            return _parse_tmap(r.json())
+            minutes, fare, coords = _parse_tmap(r.json())
+            return minutes, fare, coords, "prediction"
     except Exception:
         pass
     try:
@@ -575,10 +582,11 @@ def tmap_taxi(tmap_key, s_lat, s_lon, e_lat, e_lon, depart_iso):
                   "endX": str(e_lon), "endY": str(e_lat),
                   "reqCoordType": "WGS84GEO", "resCoordType": "WGS84GEO"}, timeout=8)
         if r.status_code == 200:
-            return _parse_tmap(r.json())
+            minutes, fare, coords = _parse_tmap(r.json())
+            return minutes, fare, coords, "live"
     except Exception:
         pass
-    return None, None, []
+    return None, None, [], None
 
 
 # =====================================================================
@@ -642,17 +650,19 @@ def _pick_hybrid_stations(cands, origin, dest, kind, limit=HYBRID_MAX_PER_TYPE):
 class _ApiMeter:
     """같은 요청 안에서는 동일한 역 쌍 API를 한 번만 호출한다."""
 
-    def __init__(self):
+    def __init__(self, time_key=None):
         self.lock = threading.Lock()
+        self.time_key = time_key
         self.odsay_n = 0
         self.odsay_s = 0.0
         self.tmap_n = 0
         self.tmap_s = 0.0
+        self.tmap_live_fallback = 0
         self.odsay_cache = {}
         self.tmap_cache = {}
 
     def odsay_paths(self, odsay_key, s_lat, s_lon, e_lat, e_lon):
-        ck = (_coord_key(s_lat, s_lon), _coord_key(e_lat, e_lon))
+        ck = (_coord_key(s_lat, s_lon), _coord_key(e_lat, e_lon), self.time_key)
         with self.lock:
             hit = self.odsay_cache.get(ck)
         if hit is not None:
@@ -668,17 +678,20 @@ class _ApiMeter:
 
     def taxi(self, tmap_key, s_lat, s_lon, e_lat, e_lon, depart_iso):
         minute_key = (depart_iso or "")[:16]
-        ck = (_coord_key(s_lat, s_lon), _coord_key(e_lat, e_lon), minute_key)
+        ck = (_coord_key(s_lat, s_lon), _coord_key(e_lat, e_lon), minute_key, self.time_key)
         with self.lock:
             hit = self.tmap_cache.get(ck)
         if hit is not None:
             return hit
         t0 = time.perf_counter()
-        result = tmap_taxi(tmap_key, s_lat, s_lon, e_lat, e_lon, depart_iso)
+        minutes, fare, coords, source = tmap_taxi(tmap_key, s_lat, s_lon, e_lat, e_lon, depart_iso)
         dt = time.perf_counter() - t0
+        result = (minutes, fare, coords)
         with self.lock:
             self.tmap_n += 1
             self.tmap_s += dt
+            if source == "live":
+                self.tmap_live_fallback += 1
             self.tmap_cache[ck] = result
         return result
 
@@ -687,7 +700,7 @@ def collect_alternatives(P, origin, dest, cong, progress_cb=None):
     rows, geoms = [], {}
     rid = 0
     rid_lock = threading.Lock()
-    meter = _ApiMeter()
+    meter = _ApiMeter(time_key=(_sheet_for(P["dep_dt"]), P["dep_dt"].strftime("%H")))
     stats = {
         "station_s": 0.0,
         "hybrid_s": 0.0,
@@ -892,6 +905,7 @@ def collect_alternatives(P, origin, dest, cong, progress_cb=None):
     stats["odsay_s"] = meter.odsay_s
     stats["tmap_n"] = meter.tmap_n
     stats["tmap_s"] = meter.tmap_s
+    stats["tmap_live_fallback"] = meter.tmap_live_fallback
     log.info(
         f"  ODsay 호출 {meter.odsay_n}회 / {meter.odsay_s:.2f}s, "
         f"TMAP 호출 {meter.tmap_n}회 / {meter.tmap_s:.2f}s, "
@@ -1278,6 +1292,10 @@ def analyze_routes(
         )
     for k, v in sorted(ODSAY_ERRORS.items(), key=lambda x: -x[1]):
         warnings.append(f"{v}회 {k}")
+    if abs((depart_dt - datetime.now()).total_seconds()) > 15 * 60:
+        warnings.append("ODsay 대중교통 경로는 출발 시각 지정을 지원하지 않아 현재 시각 기준 경로를 사용합니다.")
+    if api_stats.get("tmap_live_fallback"):
+        warnings.append("TMAP 예측 경로를 쓰지 못해 일부 택시 구간은 현재 시각 기준으로 계산했습니다.")
 
     fastest = None
     cheapest = None

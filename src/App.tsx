@@ -20,6 +20,7 @@ import {
   type SpProfile,
   type SurveyResponse,
 } from '@/lib/api'
+import { getEffectiveParams, parseManualVot, VOT_MAX, VOT_MIN } from '@/lib/params'
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 type Screen =
@@ -44,6 +45,10 @@ type TripContextValue = {
   pendingLimits: RankLimits | null
   appliedLimits: RankLimits | null
   setPendingLimits: (limits: RankLimits | null) => void
+  departMode: 'now' | 'scheduled'
+  scheduledDepart: string | null
+  setDepartNow: () => void
+  setScheduledDepart: (iso: string) => void
   startAnalyze: (origin: Place, destination: Place) => void
   retryAnalyze: () => void
   waitForAnalyze: () => Promise<AnalyzeResponse>
@@ -62,6 +67,8 @@ function useTrip() {
 const PROFILE_KEY = 'opti.sp.profile'
 const PARAMS_KEY = 'opti.sp.route_params'
 const USE_PERSONAL_KEY = 'opti.sp.use_personal'
+const MANUAL_VOT_KEY = 'opti.sp.manual_vot'
+const USER_STORE_KEY = 'opti.user.prefs'
 
 type SpContextValue = {
   survey: SurveyResponse | null
@@ -82,6 +89,8 @@ type SpContextValue = {
   displayPurpose: string
   questionCount: number
   restartSurvey: () => void
+  manualVot: number | null
+  setManualVot: (value: number | null) => void
 }
 
 const SpContext = createContext<SpContextValue | null>(null)
@@ -108,6 +117,14 @@ function writeStorage(key: string, value: unknown) {
   } catch {
     /* ignore quota / private mode */
   }
+}
+
+function persistUserStore(manualVot: number | null, profile: SpProfile | null, routeParams: RouteParams | null) {
+  writeStorage(USER_STORE_KEY, {
+    manual_vot: manualVot,
+    sp_profile: profile,
+    route_params: routeParams,
+  })
 }
 
 function altToSegments(alt: SpAlternative): Segment[] {
@@ -175,6 +192,60 @@ function arrivalLabel(iso: string | null, minutes: number) {
 function clockLabel(iso: string | null) {
   const d = iso ? new Date(iso) : new Date()
   return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+}
+
+function seoulIso(date: Date) {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Seoul',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  }).formatToParts(date)
+  const pick = (type: string) => parts.find(part => part.type === type)?.value || '00'
+  return `${pick('year')}-${pick('month')}-${pick('day')}T${pick('hour')}:${pick('minute')}:${pick('second')}+09:00`
+}
+
+function seoulParts(iso: string | null) {
+  const d = iso ? new Date(iso) : new Date()
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Seoul',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    weekday: 'short',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).formatToParts(d)
+  const pick = (type: string) => parts.find(part => part.type === type)?.value || ''
+  return {
+    year: Number(pick('year')),
+    month: Number(pick('month')),
+    day: Number(pick('day')),
+    hour: Number(pick('hour')),
+    minute: Number(pick('minute')),
+    weekday: pick('weekday'),
+  }
+}
+
+function buildSeoulIso(year: number, month: number, day: number, hour: number, minute: number) {
+  return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}T${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}:00+09:00`
+}
+
+function departChipLabel(iso: string) {
+  const now = seoulParts(null)
+  const then = seoulParts(iso)
+  const today = Date.UTC(now.year, now.month - 1, now.day)
+  const target = Date.UTC(then.year, then.month - 1, then.day)
+  const diff = Math.round((target - today) / 86400000)
+  const clock = `${String(then.hour).padStart(2, '0')}:${String(then.minute).padStart(2, '0')}`
+  if (diff === 0) return `오늘 ${clock} 출발`
+  if (diff === 1) return `내일 ${clock} 출발`
+  return `${then.month}/${then.day} ${clock} 출발`
 }
 
 const fmt = (n: number) => n.toLocaleString('ko-KR')
@@ -790,6 +861,87 @@ function PlaceSuggestList({
   )
 }
 
+function DepartSheet({
+  initialIso,
+  onClose,
+  onConfirm,
+}: {
+  initialIso: string | null
+  onClose: () => void
+  onConfirm: (iso: string) => void
+}) {
+  const initial = seoulParts(initialIso)
+  const today = seoulParts(null)
+  const [dayOffset, setDayOffset] = useState(() => {
+    const a = Date.UTC(today.year, today.month - 1, today.day)
+    const b = Date.UTC(initial.year, initial.month - 1, initial.day)
+    const diff = Math.round((b - a) / 86400000)
+    return Math.min(7, Math.max(0, diff))
+  })
+  const [hour, setHour] = useState(Number.isFinite(initial.hour) ? initial.hour : today.hour)
+  const [minute, setMinute] = useState(Math.round((Number.isFinite(initial.minute) ? initial.minute : today.minute) / 10) * 10 % 60)
+  const days = Array.from({ length: 8 }, (_, offset) => {
+    const utc = new Date(Date.UTC(today.year, today.month - 1, today.day + offset))
+    const label = offset === 0 ? '오늘' : offset === 1 ? '내일' : `${utc.getUTCMonth() + 1}/${utc.getUTCDate()}`
+    return { offset, label, year: utc.getUTCFullYear(), month: utc.getUTCMonth() + 1, day: utc.getUTCDate() }
+  })
+  const selected = days[dayOffset]
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/40" onClick={onClose}>
+      <div
+        className="w-full max-w-[430px] rounded-t-2xl bg-white px-5 pb-6 pt-4"
+        onClick={event => event.stopPropagation()}
+      >
+        <div className="mb-4 text-[15px] font-semibold text-[#111827]">출발 시각 설정</div>
+        <div className="mb-2 text-[12px] font-medium text-[#6B7280]">날짜</div>
+        <div className="mb-4 flex flex-wrap gap-2">
+          {days.map(day => (
+            <button
+              key={day.offset}
+              type="button"
+              onClick={() => setDayOffset(day.offset)}
+              className={`rounded-full px-3 py-1.5 text-[12px] font-semibold ${
+                dayOffset === day.offset ? 'bg-[#2F7BF6] text-white' : 'bg-[#F2F4F7] text-[#687386]'
+              }`}
+            >
+              {day.label}
+            </button>
+          ))}
+        </div>
+        <div className="mb-2 text-[12px] font-medium text-[#6B7280]">시간 (10분 단위)</div>
+        <div className="mb-4 flex items-center gap-2">
+          <select
+            value={hour}
+            onChange={event => setHour(Number(event.target.value))}
+            className="flex-1 rounded-xl border border-[#E5E7EB] bg-white px-3 py-2.5 text-[14px] text-[#374151] outline-none"
+          >
+            {Array.from({ length: 24 }, (_, h) => (
+              <option key={h} value={h}>{String(h).padStart(2, '0')}시</option>
+            ))}
+          </select>
+          <select
+            value={minute}
+            onChange={event => setMinute(Number(event.target.value))}
+            className="flex-1 rounded-xl border border-[#E5E7EB] bg-white px-3 py-2.5 text-[14px] text-[#374151] outline-none"
+          >
+            {[0, 10, 20, 30, 40, 50].map(m => (
+              <option key={m} value={m}>{String(m).padStart(2, '0')}분</option>
+            ))}
+          </select>
+        </div>
+        <button
+          type="button"
+          onClick={() => onConfirm(buildSeoulIso(selected.year, selected.month, selected.day, hour, minute))}
+          className="h-12 w-full rounded-xl bg-[#2F7BF6] text-[15px] font-semibold text-white"
+        >
+          이 시각으로 설정
+        </button>
+      </div>
+    </div>
+  )
+}
+
 function HomeScreen({ onNav }: { onNav: (s: Screen) => void }) {
   const trip = useTrip()
   const sp = useSp()
@@ -798,6 +950,7 @@ function HomeScreen({ onNav }: { onNav: (s: Screen) => void }) {
   const [origin, setOrigin] = useState<Place | null>(trip.origin)
   const [destination, setDestination] = useState<Place | null>(trip.destination)
   const [activeField, setActiveField] = useState<'origin' | 'destination' | null>(null)
+  const [sheetOpen, setSheetOpen] = useState(false)
   const searchBoxRef = useRef<HTMLDivElement>(null)
 
   const originSearch = usePlaceSearch(activeField === 'origin' ? originQuery : '')
@@ -895,6 +1048,44 @@ function HomeScreen({ onNav }: { onNav: (s: Screen) => void }) {
               )}
             </div>
           </div>
+          <div className="mt-3 flex gap-2">
+            <button
+              type="button"
+              onClick={() => trip.setDepartNow()}
+              className={`flex-1 h-9 rounded-full text-[12px] font-semibold ${
+                trip.departMode === 'now' ? 'bg-[#EAF2FF] text-[#2F7BF6]' : 'bg-[#F2F4F7] text-[#687386]'
+              }`}
+            >
+              지금 출발
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                if (trip.departMode === 'scheduled' && trip.scheduledDepart) {
+                  setSheetOpen(true)
+                  return
+                }
+                setSheetOpen(true)
+              }}
+              className={`flex-1 h-9 rounded-full text-[12px] font-semibold ${
+                trip.departMode === 'scheduled' ? 'bg-[#EAF2FF] text-[#2F7BF6]' : 'bg-[#F2F4F7] text-[#687386]'
+              }`}
+            >
+              {trip.departMode === 'scheduled' && trip.scheduledDepart
+                ? departChipLabel(trip.scheduledDepart)
+                : '출발 시각 설정'}
+            </button>
+          </div>
+          {sheetOpen && (
+            <DepartSheet
+              initialIso={trip.scheduledDepart}
+              onClose={() => setSheetOpen(false)}
+              onConfirm={iso => {
+                trip.setScheduledDepart(iso)
+                setSheetOpen(false)
+              }}
+            />
+          )}
           <button onClick={() => onNav('search-input')} className="flex items-center gap-1.5 mt-3 text-[13px] text-[#2F7BF6] font-medium">
             <span>📍</span> 내 위치로 출발
           </button>
@@ -926,9 +1117,16 @@ function HomeScreen({ onNav }: { onNav: (s: Screen) => void }) {
               <div>
                 <div className="text-[14px] font-semibold text-[#111827]">개인 맞춤형 시간가치(VOT) 설정하기</div>
                 <div className="text-[12px] text-[#9CA3AF] mt-0.5">
-                  {sp.usePersonal && sp.routeParams
-                    ? `내 시간가치 ${fmt(Math.round(sp.routeParams.vot))}원/분 적용 중`
-                    : '나의 VOT · 수단 선호 추정'}
+                  {(() => {
+                    const effective = getEffectiveParams({
+                      manualVot: sp.manualVot,
+                      routeParams: sp.routeParams,
+                      usePersonal: sp.usePersonal,
+                    })
+                    if (effective.source === 'default') return '나의 VOT · 수단 선호 추정'
+                    const tag = effective.source === 'manual' ? '직접 입력' : '설문 추정'
+                    return `내 시간가치 ${fmt(Math.round(effective.vot))}원/분 적용 중 (${tag})`
+                  })()}
                 </div>
               </div>
             </div>
@@ -970,18 +1168,34 @@ function SPSetupScreen({ onNav }: { onNav: (s: Screen) => void }) {
   const sp = useSp()
   const [age, setAge] = useState(sp.displayAge || '20대')
   const [purpose, setPurpose] = useState(sp.displayPurpose || '업무/비즈니스')
-  const [vot, setVot] = useState('400')
+  const [vot, setVot] = useState(sp.manualVot != null ? String(sp.manualVot) : '400')
   const [qCount, setQCount] = useState(sp.questionCount === 6 || sp.questionCount === 24 ? sp.questionCount : 12)
+  const [votError, setVotError] = useState('')
 
   const handleStart = async () => {
-    const votDirect = Number(vot)
-    if (!Number.isFinite(votDirect) || votDirect <= 0) return
+    const votDirect = parseManualVot(vot)
+    if (votDirect == null) {
+      setVotError(`${VOT_MIN}~${fmt(VOT_MAX)}원/분 사이 숫자만 입력해 주세요`)
+      return
+    }
+    setVotError('')
     try {
+      sp.setManualVot(null)
       await sp.startSurvey(age, purpose, votDirect, qCount)
       onNav('sp-question')
     } catch {
       /* surveyError is shown below */
     }
+  }
+
+  const handleSkip = () => {
+    const votDirect = parseManualVot(vot)
+    if (vot.trim() && votDirect == null) {
+      setVotError(`${VOT_MIN}~${fmt(VOT_MAX)}원/분 사이 숫자만 입력해 주세요`)
+      return
+    }
+    if (votDirect != null) sp.setManualVot(votDirect)
+    onNav('home')
   }
 
   return (
@@ -1018,13 +1232,15 @@ function SPSetupScreen({ onNav }: { onNav: (s: Screen) => void }) {
           <div className="text-[11px] text-[#9CA3AF] mb-2.5">1분 절약을 위해 지불할 의향이 있는 금액</div>
           <div className="flex items-center gap-2 border border-[#E5E7EB] rounded-xl overflow-hidden">
             <input
-              type="number"
+              type="text"
+              inputMode="numeric"
               value={vot}
-              onChange={e => setVot(e.target.value)}
+              onChange={e => { setVot(e.target.value.replace(/[^\d.]/g, '')); setVotError('') }}
               className="flex-1 px-4 py-3 text-[15px] font-medium text-[#374151] outline-none bg-transparent"
             />
             <span className="pr-4 text-[13px] text-[#9CA3AF]">원/분</span>
           </div>
+          {votError && <div className="mt-2 text-[12px] text-[#EF4444]">{votError}</div>}
         </div>
 
         {/* Question count */}
@@ -1043,7 +1259,7 @@ function SPSetupScreen({ onNav }: { onNav: (s: Screen) => void }) {
         </div>
 
         <div className="flex gap-3 pb-4">
-          <button onClick={() => onNav('home')} className="flex-1 py-4 border border-[#E5E7EB] rounded-xl text-[14px] text-[#6B7280] font-medium bg-white">
+          <button onClick={handleSkip} className="flex-1 py-4 border border-[#E5E7EB] rounded-xl text-[14px] text-[#6B7280] font-medium bg-white">
             건너뛰기
           </button>
           <button
@@ -1456,7 +1672,14 @@ function SPProfileScreen({ onNav }: { onNav: (s: Screen) => void }) {
   const sp = useSp()
   const params = sp.routeParams
   const weights = sp.profile?.weights_relative_to_uncrowded_subway || {}
-  const vot = params ? Math.round(params.vot) : null
+  const effective = getEffectiveParams({
+    manualVot: sp.manualVot,
+    routeParams: sp.routeParams,
+    usePersonal: sp.usePersonal,
+  })
+  const vot = Math.round(effective.vot)
+  const [manualDraft, setManualDraft] = useState(sp.manualVot != null ? String(sp.manualVot) : '')
+  const [manualError, setManualError] = useState('')
   const transferMin = params ? (weights.transfer_min ?? params.transfer_penalty) : null
   const taxiW = params ? (weights.taxi ?? params.delta_taxi) : null
   const details = params ? [
@@ -1485,6 +1708,51 @@ function SPProfileScreen({ onNav }: { onNav: (s: Screen) => void }) {
           )}
         </div>
 
+        <div className="bg-white rounded-2xl p-4 border border-[#E5E7EB]">
+          <div className="text-[15px] font-semibold text-[#111827] mb-1">내 시간가치 직접 수정</div>
+          <div className="text-[11px] text-[#9CA3AF] mb-3">{VOT_MIN}~{fmt(VOT_MAX)}원/분</div>
+          <div className="flex items-center gap-2 border border-[#E5E7EB] rounded-xl overflow-hidden">
+            <input
+              type="text"
+              inputMode="numeric"
+              value={manualDraft}
+              onChange={event => { setManualDraft(event.target.value.replace(/[^\d.]/g, '')); setManualError('') }}
+              className="flex-1 px-4 py-3 text-[15px] font-medium text-[#374151] outline-none bg-transparent"
+              placeholder="원/분"
+            />
+            <span className="pr-4 text-[13px] text-[#9CA3AF]">원/분</span>
+          </div>
+          {manualError && <div className="mt-2 text-[12px] text-[#EF4444]">{manualError}</div>}
+          <button
+            type="button"
+            onClick={() => {
+              const parsed = parseManualVot(manualDraft)
+              if (parsed == null) {
+                setManualError(`${VOT_MIN}~${fmt(VOT_MAX)}원/분 사이 숫자만 입력해 주세요`)
+                return
+              }
+              sp.setManualVot(parsed)
+              setManualError('')
+            }}
+            className="mt-3 w-full py-3 bg-[#2F7BF6] rounded-xl text-[14px] font-semibold text-white"
+          >
+            저장
+          </button>
+          {sp.manualVot != null && (
+            <button
+              type="button"
+              onClick={() => {
+                sp.setManualVot(null)
+                setManualDraft('')
+                setManualError('')
+              }}
+              className="mt-2 w-full py-3 border border-[#E5E7EB] rounded-xl text-[14px] font-medium text-[#6B7280] bg-white"
+            >
+              설문 추정값으로 되돌리기
+            </button>
+          )}
+        </div>
+
         {/* User summary */}
         <div className="bg-white rounded-2xl p-4 border border-[#E5E7EB]">
           <div className="flex items-center gap-3 mb-3">
@@ -1508,7 +1776,9 @@ function SPProfileScreen({ onNav }: { onNav: (s: Screen) => void }) {
           <div className="grid grid-cols-3 gap-2 pt-3 border-t border-[#F3F4F6]">
             <div className="text-center">
               <div className="text-[11px] text-[#9CA3AF] mb-0.5">시간가치</div>
-              <div className="text-[15px] font-bold text-[#2F7BF6]">{vot != null ? `${fmt(vot)}원/분` : '—'}</div>
+              <div className="text-[15px] font-bold text-[#2F7BF6]">
+                {effective.source === 'default' && !sp.routeParams ? '—' : `${fmt(vot)}원/분`}
+              </div>
             </div>
             <div className="text-center">
               <div className="text-[11px] text-[#9CA3AF] mb-0.5">환승 1회</div>
@@ -1794,10 +2064,9 @@ function ResultsScreen({ onNav }: { onNav: (s: Screen) => void }) {
       </div>
 
         <div className="flex items-center justify-between px-4 py-2 border-b border-[#F3F4F6]">
-        <div className="flex items-center gap-1 text-[12px] text-[#374151]">
-          <span>{clockLabel(trip.departTime)} 출발</span>
-          <svg width="10" height="10" viewBox="0 0 10 10" fill="none"><path d="M2 4l3 3 3-3" stroke="#374151" strokeWidth="1.2"/></svg>
-        </div>
+        <button type="button" onClick={() => onNav('home')} className="text-[12px] font-semibold text-[#374151]">
+          출발 {clockLabel(trip.departTime)} → 도착 예정 {rank1 ? clockAfter(trip.departTime, rank1.total_time) : '--:--'}
+        </button>
         <button
           type="button"
           onClick={() => onNav('reservation')}
@@ -2513,13 +2782,35 @@ export default function App() {
   const [profile, setProfile] = useState<SpProfile | null>(storedProfile)
   const [routeParams, setRouteParams] = useState<RouteParams | null>(() => readStorage<RouteParams>(PARAMS_KEY))
   const [usePersonal, setUsePersonalState] = useState(() => readStorage<boolean>(USE_PERSONAL_KEY) !== false)
+  const [manualVot, setManualVotState] = useState<number | null>(() => {
+    const stored = readStorage<number | null>(MANUAL_VOT_KEY)
+    return typeof stored === 'number' ? stored : null
+  })
   const [displayAge, setDisplayAge] = useState(storedProfile?.display_age || storedProfile?.age_group || '')
   const [displayPurpose, setDisplayPurpose] = useState(storedProfile?.display_purpose || storedProfile?.purpose || '')
   const [questionCount, setQuestionCount] = useState(storedProfile?.length || 0)
+  const [departMode, setDepartMode] = useState<'now' | 'scheduled'>('now')
+  const [scheduledDepart, setScheduledDepartState] = useState<string | null>(null)
 
   const setUsePersonal = (value: boolean) => {
     setUsePersonalState(value)
     writeStorage(USE_PERSONAL_KEY, value)
+  }
+
+  const setManualVot = (value: number | null) => {
+    setManualVotState(value)
+    writeStorage(MANUAL_VOT_KEY, value)
+    persistUserStore(value, profile, routeParams)
+  }
+
+  const setDepartNow = () => {
+    setDepartMode('now')
+    setScheduledDepartState(null)
+  }
+
+  const setScheduledDepart = (iso: string) => {
+    setDepartMode('scheduled')
+    setScheduledDepartState(iso)
   }
 
   const setAnswer = (cardIndex: number, altIndex: number) => {
@@ -2581,6 +2872,7 @@ export default function App() {
       setRouteParams(result.route_params)
       writeStorage(PROFILE_KEY, savedProfile)
       writeStorage(PARAMS_KEY, result.route_params)
+      persistUserStore(manualVot, savedProfile, result.route_params)
     } catch (error) {
       if (id !== estimateId.current) return
       setEstimateError(error instanceof Error ? error.message : '추정에 실패했습니다.')
@@ -2607,11 +2899,16 @@ export default function App() {
     setRanking(null)
     setRankError(null)
     setAppliedLimits(null)
+    const effective = getEffectiveParams({
+      manualVot,
+      routeParams,
+      usePersonal,
+    })
     const request = analyzeRoutes(
       { name: from.name, lat: from.lat, lng: from.lng },
       { name: to.name, lat: to.lat, lng: to.lng },
       when,
-      usePersonal ? routeParams : null,
+      effective.params,
       info => {
         if (id !== requestId.current) return
         setAnalyzeProgress(info.progress)
@@ -2636,7 +2933,7 @@ export default function App() {
   }
 
   const startAnalyze = (from: Place, to: Place) => {
-    const when = new Date().toISOString()
+    const when = departMode === 'scheduled' && scheduledDepart ? scheduledDepart : seoulIso(new Date())
     setOrigin(from)
     setDestination(to)
     setDepartTime(when)
@@ -2702,6 +2999,10 @@ export default function App() {
     pendingLimits,
     appliedLimits,
     setPendingLimits,
+    departMode,
+    scheduledDepart,
+    setDepartNow,
+    setScheduledDepart,
     startAnalyze,
     retryAnalyze,
     waitForAnalyze,
@@ -2728,6 +3029,8 @@ export default function App() {
     displayPurpose,
     questionCount,
     restartSurvey,
+    manualVot,
+    setManualVot,
   }
 
   const screens: Record<Screen, React.ReactNode> = {

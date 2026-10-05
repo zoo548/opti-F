@@ -238,7 +238,7 @@ export function analyzeRoutes(
   params?: RouteParams | null,
   onProgress?: (info: { progress: number; stage: string }) => void,
 ): Promise<AnalyzeResponse> {
-  const body: Record<string, unknown> = { origin, dest, departTime }
+  const body: Record<string, unknown> = { origin, dest, departTime, depart_time: departTime }
   if (params) body.params = params
 
   return (async () => {

@@ -62,6 +62,7 @@ class AnalyzeIn(BaseModel):
     origin: PlaceIn
     dest: PlaceIn
     departTime: str | None = Field(default=None)
+    depart_time: str | None = Field(default=None)
     params: dict | None = None
 
 
@@ -104,6 +105,10 @@ def _parse_depart(value: str | None) -> datetime:
     return parsed
 
 
+def _depart_from_body(body: AnalyzeIn) -> datetime:
+    return _parse_depart(body.depart_time or body.departTime)
+
+
 def _purge_jobs():
     now = time.time()
     with _jobs_lock:
@@ -131,7 +136,7 @@ def routes_analyze(body: AnalyzeIn):
         return analyze_routes(
             origin=body.origin.model_dump(),
             dest=body.dest.model_dump(),
-            depart_dt=_parse_depart(body.departTime),
+            depart_dt=_depart_from_body(body),
             params=body.params,
         )
     except HTTPException:
@@ -157,7 +162,7 @@ def routes_analyze_job_create(body: AnalyzeIn):
 
     origin = body.origin.model_dump()
     dest = body.dest.model_dump()
-    depart_dt = _parse_depart(body.departTime)
+    depart_dt = _depart_from_body(body)
     params = body.params
 
     def run():
