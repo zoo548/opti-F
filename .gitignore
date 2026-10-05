@@ -6,6 +6,7 @@ build/
 .env
 backend/.env
 !.env.example
+!backend/.env.example
 __pycache__/
 *.pyc
 *.pyo
@@ -27,3 +28,5 @@ logs/
 # beside it.
 /.plugins/
 /.opencode-skills/
+
+backend/algorithms/sp_설문_알고리즘.py
