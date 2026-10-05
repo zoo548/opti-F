@@ -21,6 +21,7 @@ import {
   type SurveyResponse,
 } from '@/lib/api'
 import { getEffectiveParams, MANUAL_COEFFS, parseManualCoeff, parseManualVot, sanitizeManualParams, VOT_MAX, VOT_MIN, type ManualCoeffKey, type ManualParams, type ParamSource } from '@/lib/params'
+import { BETA_MAX, betasEqual, conditionShare, DEFAULT_BETAS, parseManualBetas, previewLine, previewWeights, type RankingBetas } from '@/lib/ranking'
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 type Screen =
@@ -54,6 +55,7 @@ type TripContextValue = {
   waitForAnalyze: () => Promise<AnalyzeResponse>
   applyRank: (limits: RankLimits, candidates?: RouteCandidate[]) => Promise<void>
   clearRanking: () => void
+  rankedBetas: RankingBetas | null
 }
 
 const TripContext = createContext<TripContextValue | null>(null)
@@ -69,6 +71,7 @@ const PARAMS_KEY = 'opti.sp.route_params'
 const USE_PERSONAL_KEY = 'opti.sp.use_personal'
 const MANUAL_VOT_KEY = 'opti.sp.manual_vot'
 const MANUAL_PARAMS_KEY = 'opti.sp.manual_params'
+const MANUAL_BETAS_KEY = 'opti.sp.manual_betas'
 const USER_STORE_KEY = 'opti.user.prefs'
 
 type SpContextValue = {
@@ -95,6 +98,9 @@ type SpContextValue = {
   manualParams: ManualParams
   setManualCoeff: (key: ManualCoeffKey, value: number | null) => boolean
   resetManualParams: () => void
+  rankingBetas: RankingBetas
+  setRankingBetas: (value: RankingBetas) => void
+  resetRankingBetas: () => void
 }
 
 const SpContext = createContext<SpContextValue | null>(null)
@@ -128,10 +134,12 @@ function persistUserStore(
   profile: SpProfile | null,
   routeParams: RouteParams | null,
   manualParams: ManualParams,
+  rankingBetas: RankingBetas,
 ) {
   writeStorage(USER_STORE_KEY, {
     manual_vot: manualVot,
     manual_params: manualParams,
+    manual_betas: rankingBetas,
     sp_profile: profile,
     route_params: routeParams,
   })
@@ -1689,6 +1697,81 @@ function SPCompleteScreen({ onNav }: { onNav: (s: Screen) => void }) {
   )
 }
 
+function RankingWeightSection() {
+  const sp = useSp()
+  const trip = useTrip()
+  const betas = sp.rankingBetas
+  const split = conditionShare(betas.gc, betas.knee)
+  const restPct = Math.round(split.rest * 100)
+  const rawRest = 1 - betas.gc - betas.knee
+  const limits = trip.appliedLimits || trip.pendingLimits
+  const axes: Array<'time' | 'cost' | 'transfer'> = []
+  if (limits?.arrive_by || limits?.max_time_min != null) axes.push('time')
+  if (limits?.max_cost_krw != null) axes.push('cost')
+  if (limits?.max_transfers != null) axes.push('transfer')
+  const previewAxes = axes.length ? axes : (['time', 'cost', 'transfer'] as const)
+  const weights = previewWeights(betas, [...previewAxes], limits?.importance)
+  const setPct = (key: 'gc' | 'knee', pct: number) => {
+    const next = Math.max(0, Math.min(BETA_MAX * 100, Math.round(pct))) / 100
+    sp.setRankingBetas({ ...betas, [key]: next })
+  }
+
+  return (
+    <div className="rounded-xl bg-[#F9FAFB] px-3 py-3 space-y-3">
+      <div>
+        <div className="text-[13px] font-semibold text-[#111827]">추천 기준 비중</div>
+        <div className="mt-0.5 text-[11px] text-[#9CA3AF]">가성비와 균형점 비중을 조절하면, 나머지는 내가 정한 조건에 쓰여요.</div>
+      </div>
+      <div>
+        <div className="flex items-center justify-between mb-1">
+          <span className="text-[13px] font-semibold text-[#111827]">가성비</span>
+          <span className="text-[13px] font-bold text-[#374151]">{Math.round(betas.gc * 100)}%</span>
+        </div>
+        <input
+          type="range"
+          min={0}
+          max={60}
+          step={1}
+          value={Math.round(betas.gc * 100)}
+          aria-label="가성비 비중"
+          onChange={event => setPct('gc', Number(event.target.value))}
+          className="w-full"
+        />
+      </div>
+      <div>
+        <div className="flex items-center justify-between mb-1">
+          <span className="text-[13px] font-semibold text-[#111827]">균형점</span>
+          <span className="text-[13px] font-bold text-[#374151]">{Math.round(betas.knee * 100)}%</span>
+        </div>
+        <input
+          type="range"
+          min={0}
+          max={60}
+          step={1}
+          value={Math.round(betas.knee * 100)}
+          aria-label="균형점 비중"
+          onChange={event => setPct('knee', Number(event.target.value))}
+          className="w-full"
+        />
+      </div>
+      <div className="text-[12px] text-[#374151]">
+        내 조건(시간·요금·환승) {restPct}%
+      </div>
+      {rawRest < 0.1 - 1e-9 && (
+        <div className="text-[11px] text-[#B45309]">가성비와 균형점 합이 90%를 넘어, 내 조건 몫을 10%로 맞춰 적용해요.</div>
+      )}
+      <div className="text-[12px] font-medium text-[#111827]">{previewLine(weights)}</div>
+      <button
+        type="button"
+        onClick={() => sp.resetRankingBetas()}
+        className="w-full py-2.5 border border-[#E5E7EB] rounded-xl text-[13px] font-medium text-[#6B7280] bg-white"
+      >
+        기본값으로 되돌리기
+      </button>
+    </div>
+  )
+}
+
 function SPProfileScreen({ onNav }: { onNav: (s: Screen) => void }) {
   const sp = useSp()
   const params = sp.routeParams
@@ -1854,6 +1937,7 @@ function SPProfileScreen({ onNav }: { onNav: (s: Screen) => void }) {
           </button>
           {advancedOpen && (
             <div className="px-4 pb-4 space-y-4 border-t border-[#F3F4F6] pt-3">
+              <RankingWeightSection />
               <div className="rounded-xl bg-[#F9FAFB] px-3 py-3">
                 <div className="flex items-center justify-between mb-1">
                   <div>
@@ -2124,6 +2208,7 @@ type RouteType = 'all' | 'hybrid' | 'transit' | 'taxi'
 
 function ResultsScreen({ onNav }: { onNav: (s: Screen) => void }) {
   const trip = useTrip()
+  const sp = useSp()
   const [tab, setTab] = useState<RouteType>('all')
   const data = trip.analysis
   const candidates = data?.candidates ?? []
@@ -2209,6 +2294,19 @@ function ResultsScreen({ onNav }: { onNav: (s: Screen) => void }) {
           {limitsSummary(trip.appliedLimits) || '조건 없음'}
         </button>
       </div>
+
+      {trip.ranking && trip.appliedLimits && !betasEqual(sp.rankingBetas, trip.rankedBetas) && (
+        <div className="px-4 py-2.5 border-b border-[#F3F4F6] bg-[#FFF7ED]">
+          <button
+            type="button"
+            disabled={trip.rankingBusy}
+            onClick={() => { void trip.applyRank(trip.appliedLimits!) }}
+            className="w-full rounded-xl bg-[#2F7BF6] py-2.5 text-[13px] font-semibold text-white disabled:opacity-60"
+          >
+            {trip.rankingBusy ? '정렬 중…' : '설정이 바뀌었어요 · 다시 정렬'}
+          </button>
+        </div>
+      )}
 
       <div className="flex-1 overflow-y-auto pb-20">
         {rank1 && (taxiOnly || transitOnly) && (
@@ -2468,10 +2566,10 @@ function ReservationScreen({ onNav }: { onNav: (s: Screen) => void }) {
   const [maxCost, setMaxCost] = useState(seed?.max_cost_krw != null ? Number(seed.max_cost_krw) : 20000)
   const [transferLimit, setTransferLimit] = useState(seed?.max_transfers != null ? Number(seed.max_transfers) : 2)
   const [strictness, setStrictness] = useState<Record<Condition, Strictness>>({
-    time: 'medium',
-    cost: 'medium',
-    transfer: 'medium',
-    duration: 'medium',
+    time: seed?.importance?.time || 'medium',
+    cost: seed?.importance?.cost || 'medium',
+    transfer: seed?.importance?.transfer || 'medium',
+    duration: seed?.importance?.duration || seed?.importance?.time || 'medium',
   })
   const [enabled, setEnabled] = useState<Record<Condition, boolean>>({
     time: Boolean(seed?.arrive_by),
@@ -2562,10 +2660,24 @@ function ReservationScreen({ onNav }: { onNav: (s: Screen) => void }) {
 
   const collectLimits = (): RankLimits | null => {
     const limits: RankLimits = {}
-    if (enabled.duration && maxTime.trim()) limits.max_time_min = Number(maxTime)
-    if (enabled.cost) limits.max_cost_krw = maxCost
-    if (enabled.transfer) limits.max_transfers = transferLimit
-    if (enabled.time) limits.arrive_by = arrivalToIso(trip.departTime, arrivalTime)
+    const importance: NonNullable<RankLimits['importance']> = {}
+    if (enabled.duration && maxTime.trim()) {
+      limits.max_time_min = Number(maxTime)
+      importance.duration = strictness.duration
+    }
+    if (enabled.cost) {
+      limits.max_cost_krw = maxCost
+      importance.cost = strictness.cost
+    }
+    if (enabled.transfer) {
+      limits.max_transfers = transferLimit
+      importance.transfer = strictness.transfer
+    }
+    if (enabled.time) {
+      limits.arrive_by = arrivalToIso(trip.departTime, arrivalTime)
+      importance.time = strictness.time
+    }
+    if (Object.keys(importance).length) limits.importance = importance
     return hasLimits(limits) ? limits : null
   }
 
@@ -2926,6 +3038,13 @@ export default function App() {
     const store = readStorage<{ manual_params?: unknown }>(USER_STORE_KEY)
     return sanitizeManualParams(store?.manual_params)
   })
+  const [rankingBetas, setRankingBetasState] = useState<RankingBetas>(() => {
+    const dedicated = parseManualBetas(readStorage(MANUAL_BETAS_KEY))
+    if (dedicated) return dedicated
+    const store = readStorage<{ manual_betas?: unknown }>(USER_STORE_KEY)
+    return parseManualBetas(store?.manual_betas) ?? { ...DEFAULT_BETAS }
+  })
+  const [rankedBetas, setRankedBetas] = useState<RankingBetas | null>(null)
   const [displayAge, setDisplayAge] = useState(storedProfile?.display_age || storedProfile?.age_group || '')
   const [displayPurpose, setDisplayPurpose] = useState(storedProfile?.display_purpose || storedProfile?.purpose || '')
   const [questionCount, setQuestionCount] = useState(storedProfile?.length || 0)
@@ -2940,12 +3059,12 @@ export default function App() {
   const setManualVot = (value: number | null) => {
     setManualVotState(value)
     writeStorage(MANUAL_VOT_KEY, value)
-    persistUserStore(value, profile, routeParams, manualParams)
+    persistUserStore(value, profile, routeParams, manualParams, rankingBetas)
   }
 
   const persistManualParams = (next: ManualParams) => {
     writeStorage(MANUAL_PARAMS_KEY, next)
-    persistUserStore(manualVot, profile, routeParams, next)
+    persistUserStore(manualVot, profile, routeParams, next, rankingBetas)
   }
 
   const setManualCoeff = (key: ManualCoeffKey, value: number | null) => {
@@ -2963,6 +3082,21 @@ export default function App() {
   const resetManualParams = () => {
     setManualParamsState({})
     persistManualParams({})
+  }
+
+  const persistRankingBetas = (next: RankingBetas) => {
+    writeStorage(MANUAL_BETAS_KEY, next)
+    persistUserStore(manualVot, profile, routeParams, manualParams, next)
+  }
+
+  const setRankingBetas = (value: RankingBetas) => {
+    const parsed = parseManualBetas(value) ?? { ...DEFAULT_BETAS }
+    setRankingBetasState(parsed)
+    persistRankingBetas(parsed)
+  }
+
+  const resetRankingBetas = () => {
+    setRankingBetas({ ...DEFAULT_BETAS })
   }
 
   const setDepartNow = () => {
@@ -3034,7 +3168,7 @@ export default function App() {
       setRouteParams(result.route_params)
       writeStorage(PROFILE_KEY, savedProfile)
       writeStorage(PARAMS_KEY, result.route_params)
-      persistUserStore(manualVot, savedProfile, result.route_params, manualParams)
+      persistUserStore(manualVot, savedProfile, result.route_params, manualParams, rankingBetas)
     } catch (error) {
       if (id !== estimateId.current) return
       setEstimateError(error instanceof Error ? error.message : '추정에 실패했습니다.')
@@ -3061,6 +3195,7 @@ export default function App() {
     setRanking(null)
     setRankError(null)
     setAppliedLimits(null)
+    setRankedBetas(null)
     const effective = getEffectiveParams({
       manualVot,
       manualParams,
@@ -3126,9 +3261,10 @@ export default function App() {
     setRankingBusy(true)
     setRankError(null)
     try {
-      const result = await rankRoutes(source, limits)
+      const result = await rankRoutes(source, limits, rankingBetas)
       setRanking(result)
       setAppliedLimits(limits)
+      setRankedBetas({ ...rankingBetas })
     } catch (error) {
       const message = error instanceof Error ? error.message : '조건 적용에 실패했습니다.'
       setRankError(message)
@@ -3142,6 +3278,7 @@ export default function App() {
     setRanking(null)
     setRankError(null)
     setAppliedLimits(null)
+    setRankedBetas(null)
   }
 
   const trip: TripContextValue = {
@@ -3171,6 +3308,7 @@ export default function App() {
     waitForAnalyze,
     applyRank,
     clearRanking,
+    rankedBetas,
   }
 
   const sp: SpContextValue = {
@@ -3197,6 +3335,9 @@ export default function App() {
     manualParams,
     setManualCoeff,
     resetManualParams,
+    rankingBetas,
+    setRankingBetas,
+    resetRankingBetas,
   }
 
   const screens: Record<Screen, React.ReactNode> = {

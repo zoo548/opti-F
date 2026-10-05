@@ -395,9 +395,21 @@ def _drop_nonbinding(lim, anc):
     return lim
 
 
-def _default_weights(lim, use_knee):
-    bg = BETA_GC_DEFAULT / 100.0
-    bk = (BETA_KNEE_DEFAULT / 100.0) if use_knee else 0.0
+_IMP_LEVEL = {
+    "하": 1.0, "중": 3.0, "상": 5.0,
+    "low": 1.0, "medium": 3.0, "high": 5.0,
+}
+
+_IMP_ALIASES = {
+    "시간": "시간", "time": "시간", "duration": "시간", "max_time_min": "시간",
+    "비용": "비용", "cost": "비용", "max_cost_krw": "비용",
+    "환승": "환승", "transfers": "환승", "max_transfers": "환승",
+}
+
+
+def _allocate_weights(bg, bk, lim, use_knee, imp=None):
+    if not use_knee:
+        bk = 0.0
     if not lim:
         tot = bg + bk
         if tot < EPS:
@@ -408,12 +420,18 @@ def _default_weights(lim, use_knee):
             w["Knee"] = bk / tot
         return w, (bg, bk)
 
-    if bg + bk >= 1.0 - EPS:
+    if bg + bk > 0.9 + EPS:
         sc = 0.9 / max(bg + bk, EPS)
         bg, bk = bg * sc, bk * sc
 
     rest = 1.0 - bg - bk
-    imp = {k: 3.0 for k in lim}
+    if imp is None:
+        imp = {k: 3.0 for k in lim}
+    else:
+        imp = {k: float(imp.get(k, 3.0)) for k in lim}
+        for k in list(imp):
+            if imp[k] <= 0:
+                imp[k] = 3.0
     si = sum(imp.values()) or 1.0
 
     w = {"GC": bg}
@@ -422,6 +440,41 @@ def _default_weights(lim, use_knee):
     for k, v in imp.items():
         w[k] = rest * (v / si)
     return w, (bg, bk)
+
+
+def _default_weights(lim, use_knee):
+    bg = BETA_GC_DEFAULT / 100.0
+    bk = (BETA_KNEE_DEFAULT / 100.0) if use_knee else 0.0
+    return _allocate_weights(bg, bk, lim, use_knee)
+
+
+def _parse_importance(importance, lim):
+    if not importance or not lim:
+        return {k: 3.0 for k in lim}
+    mapped = {}
+    if isinstance(importance, dict):
+        for key, val in importance.items():
+            name = _IMP_ALIASES.get(str(key))
+            if not name:
+                continue
+            if isinstance(val, str):
+                mapped[name] = _IMP_LEVEL.get(val.strip(), 3.0)
+            else:
+                mapped[name] = float(val)
+    return {k: mapped.get(k, 3.0) for k in lim}
+
+
+def _weights_from_betas(betas, importance, lim, use_knee):
+    if not isinstance(betas, dict):
+        raise ValueError("betas는 {gc, knee} 객체여야 합니다.")
+    gc = float(betas.get("gc", BETA_GC_DEFAULT / 100.0))
+    knee = float(betas.get("knee", BETA_KNEE_DEFAULT / 100.0))
+    if gc < -EPS or gc > 0.6 + EPS or knee < -EPS or knee > 0.6 + EPS:
+        raise ValueError("betas.gc와 betas.knee는 0 이상 0.6 이하여야 합니다.")
+    gc = min(max(gc, 0.0), 0.6)
+    knee = min(max(knee, 0.0), 0.6)
+    imp = _parse_importance(importance, lim)
+    return _allocate_weights(gc, knee, lim, use_knee, imp)
 
 
 def _weights_from_request(weights, lim, use_knee):
@@ -484,16 +537,23 @@ def _over_dict(row, lim):
     return over
 
 
-def rank_routes(candidates: list[dict], limits: dict, weights: dict | None = None, psi: float = 0.0) -> dict:
+def rank_routes(
+    candidates: list[dict],
+    limits: dict,
+    weights: dict | None = None,
+    psi: float = 0.0,
+    betas: dict | None = None,
+    importance: dict | None = None,
+) -> dict:
     """analyze candidates와 상한으로 후회율 순위를 매긴다."""
     if not candidates:
-        return {"ranking": [], "robust": True, "applied_limits": {}}
+        return {"ranking": [], "robust": True, "applied_limits": {}, "applied_weights": {}}
 
     df = _candidates_to_df(candidates)
     df = pareto_front(df)
     df, _merged = dedupe_routes(df, verbose=False)
     if len(df) == 0:
-        return {"ranking": [], "robust": True, "applied_limits": {}}
+        return {"ranking": [], "robust": True, "applied_limits": {}, "applied_weights": {}}
 
     df, knee_ok, _knee_why = add_knee_score(df)
     anc = anchors(df)
@@ -502,18 +562,20 @@ def rank_routes(candidates: list[dict], limits: dict, weights: dict | None = Non
     lim, applied_src, arrive_by = _limits_from_request(limits, df)
     lim = _drop_nonbinding(lim, anc)
 
-    if weights is None:
-        w, betas = _default_weights(lim, use_knee)
+    if betas is not None:
+        w, betas_used = _weights_from_betas(betas, importance, lim, use_knee)
+    elif weights is None:
+        w, betas_used = _default_weights(lim, use_knee)
     else:
-        w, betas = _weights_from_request(weights, lim, use_knee)
+        w, betas_used = _weights_from_request(weights, lim, use_knee)
 
     psi = min(max(float(psi if psi is not None else PSI_DEFAULT), 0.0), 1.0)
     out, dev = regret_matrix(df, anc, lim, psi, use_knee=use_knee)
     o = score(out, dev, w)
     ranked = o.sort_values("S").reset_index(drop=True)
 
-    robustness(out, dev, lim, betas, use_knee=use_knee)
-    robust = _robust_flag(out, dev, lim, betas, use_knee=use_knee)
+    robustness(out, dev, lim, betas_used, use_knee=use_knee)
+    robust = _robust_flag(out, dev, lim, betas_used, use_knee=use_knee)
 
     ranking = []
     for i, row in ranked.iterrows():
@@ -529,4 +591,5 @@ def rank_routes(candidates: list[dict], limits: dict, weights: dict | None = Non
         "ranking": ranking,
         "robust": bool(robust),
         "applied_limits": _applied_limits(lim, applied_src, arrive_by),
+        "applied_weights": {k: _py(float(v)) for k, v in w.items()},
     }

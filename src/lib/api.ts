@@ -39,11 +39,26 @@ export type AnalyzeResponse = {
   warnings: string[]
 }
 
+export type RankImportanceLevel = 'low' | 'medium' | 'high'
+
+export type RankImportance = {
+  time?: RankImportanceLevel
+  duration?: RankImportanceLevel
+  cost?: RankImportanceLevel
+  transfer?: RankImportanceLevel
+}
+
 export type RankLimits = {
   max_time_min?: number | null
   max_cost_krw?: number | null
   max_transfers?: number | null
   arrive_by?: string | null
+  importance?: RankImportance
+}
+
+export type RankBetas = {
+  gc: number
+  knee: number
 }
 
 export type RankOver = {
@@ -64,6 +79,7 @@ export type RankResponse = {
   ranking: RankItem[]
   robust: boolean
   applied_limits: RankLimits
+  applied_weights?: Record<string, number>
 }
 
 export const ROUTE_TYPE_LABEL: Record<string, string> = {
@@ -284,8 +300,12 @@ export function estimateProfile(
 export function rankRoutes(
   candidates: RouteCandidate[],
   limits: RankLimits,
+  betas?: RankBetas | null,
 ): Promise<RankResponse> {
-  return apiPost<RankResponse>('/routes/rank', { candidates, limits })
+  const body: Record<string, unknown> = { candidates, limits }
+  if (betas) body.betas = betas
+  if (limits.importance) body.importance = limits.importance
+  return apiPost<RankResponse>('/routes/rank', body)
 }
 
 export function legToSegment(leg: RouteLeg) {

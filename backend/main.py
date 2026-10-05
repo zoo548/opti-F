@@ -73,10 +73,17 @@ class RankLimitsIn(BaseModel):
     arrive_by: str | None = None
 
 
+class RankBetasIn(BaseModel):
+    gc: float | None = None
+    knee: float | None = None
+
+
 class RankIn(BaseModel):
     candidates: list[dict]
     limits: RankLimitsIn
     weights: dict[str, float] | None = None
+    betas: RankBetasIn | dict | None = None
+    importance: dict | None = None
     psi: float | None = Field(default=0.0)
 
 
@@ -204,11 +211,17 @@ def routes_analyze_job_get(job_id: str):
 @app.post("/routes/rank")
 def routes_rank(body: RankIn):
     try:
+        betas = None
+        if body.betas is not None:
+            raw = body.betas.model_dump() if hasattr(body.betas, "model_dump") else dict(body.betas)
+            betas = {k: v for k, v in raw.items() if v is not None} or None
         return rank_routes(
             candidates=body.candidates,
             limits=body.limits.model_dump(),
             weights=body.weights,
             psi=0.0 if body.psi is None else body.psi,
+            betas=betas,
+            importance=body.importance,
         )
     except HTTPException:
         raise
