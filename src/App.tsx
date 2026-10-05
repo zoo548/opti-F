@@ -20,7 +20,7 @@ import {
   type SpProfile,
   type SurveyResponse,
 } from '@/lib/api'
-import { getEffectiveParams, parseManualVot, VOT_MAX, VOT_MIN } from '@/lib/params'
+import { getEffectiveParams, MANUAL_COEFFS, parseManualCoeff, parseManualVot, sanitizeManualParams, VOT_MAX, VOT_MIN, type ManualCoeffKey, type ManualParams, type ParamSource } from '@/lib/params'
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 type Screen =
@@ -68,6 +68,7 @@ const PROFILE_KEY = 'opti.sp.profile'
 const PARAMS_KEY = 'opti.sp.route_params'
 const USE_PERSONAL_KEY = 'opti.sp.use_personal'
 const MANUAL_VOT_KEY = 'opti.sp.manual_vot'
+const MANUAL_PARAMS_KEY = 'opti.sp.manual_params'
 const USER_STORE_KEY = 'opti.user.prefs'
 
 type SpContextValue = {
@@ -91,6 +92,9 @@ type SpContextValue = {
   restartSurvey: () => void
   manualVot: number | null
   setManualVot: (value: number | null) => void
+  manualParams: ManualParams
+  setManualCoeff: (key: ManualCoeffKey, value: number | null) => boolean
+  resetManualParams: () => void
 }
 
 const SpContext = createContext<SpContextValue | null>(null)
@@ -119,9 +123,15 @@ function writeStorage(key: string, value: unknown) {
   }
 }
 
-function persistUserStore(manualVot: number | null, profile: SpProfile | null, routeParams: RouteParams | null) {
+function persistUserStore(
+  manualVot: number | null,
+  profile: SpProfile | null,
+  routeParams: RouteParams | null,
+  manualParams: ManualParams,
+) {
   writeStorage(USER_STORE_KEY, {
     manual_vot: manualVot,
+    manual_params: manualParams,
     sp_profile: profile,
     route_params: routeParams,
   })
@@ -246,6 +256,16 @@ function departChipLabel(iso: string) {
   if (diff === 0) return `오늘 ${clock} 출발`
   if (diff === 1) return `내일 ${clock} 출발`
   return `${then.month}/${then.day} ${clock} 출발`
+}
+
+function sourceBadge(source: ParamSource) {
+  const label = source === 'manual' ? '직접' : source === 'survey' ? '설문' : '기본'
+  const cls = source === 'manual'
+    ? 'text-[#2F7BF6] bg-[#EAF2FF]'
+    : source === 'survey'
+      ? 'text-[#16A34A] bg-[#DCFCE7]'
+      : 'text-[#6B7280] bg-[#F3F4F6]'
+  return <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full ${cls}`}>{label}</span>
 }
 
 const fmt = (n: number) => n.toLocaleString('ko-KR')
@@ -1120,11 +1140,12 @@ function HomeScreen({ onNav }: { onNav: (s: Screen) => void }) {
                   {(() => {
                     const effective = getEffectiveParams({
                       manualVot: sp.manualVot,
+                      manualParams: sp.manualParams,
                       routeParams: sp.routeParams,
                       usePersonal: sp.usePersonal,
                     })
-                    if (effective.source === 'default') return '나의 VOT · 수단 선호 추정'
-                    const tag = effective.source === 'manual' ? '직접 입력' : '설문 추정'
+                    if (effective.sources.vot === 'default') return '나의 VOT · 수단 선호 추정'
+                    const tag = effective.sources.vot === 'manual' ? '직접 입력' : '설문 추정'
                     return `내 시간가치 ${fmt(Math.round(effective.vot))}원/분 적용 중 (${tag})`
                   })()}
                 </div>
@@ -1674,14 +1695,18 @@ function SPProfileScreen({ onNav }: { onNav: (s: Screen) => void }) {
   const weights = sp.profile?.weights_relative_to_uncrowded_subway || {}
   const effective = getEffectiveParams({
     manualVot: sp.manualVot,
+    manualParams: sp.manualParams,
     routeParams: sp.routeParams,
     usePersonal: sp.usePersonal,
   })
   const vot = Math.round(effective.vot)
   const [manualDraft, setManualDraft] = useState(sp.manualVot != null ? String(sp.manualVot) : '')
   const [manualError, setManualError] = useState('')
-  const transferMin = params ? (weights.transfer_min ?? params.transfer_penalty) : null
-  const taxiW = params ? (weights.taxi ?? params.delta_taxi) : null
+  const [advancedOpen, setAdvancedOpen] = useState(false)
+  const [coeffDraft, setCoeffDraft] = useState<Record<string, string>>({})
+  const [coeffError, setCoeffError] = useState<Partial<Record<ManualCoeffKey, string>>>({})
+  const transferMin = effective.params.transfer_penalty
+  const taxiW = effective.params.delta_taxi
   const details = params ? [
     { key: 'vot', label: '나의 시간가치', hint: '1분을 아끼기 위해 지불할 의향', value: `${fmt(vot!)}원/분`, bar: Math.min((params.vot / 600) * 100, 100), color: '#2F7BF6' },
     { key: 'taxi', label: '택시 체감', hint: feelLine('택시', taxiW!), value: (taxiW!).toFixed(2), bar: Math.min((taxiW! / 3) * 100, 100), color: '#FF6B3D' },
@@ -1777,16 +1802,16 @@ function SPProfileScreen({ onNav }: { onNav: (s: Screen) => void }) {
             <div className="text-center">
               <div className="text-[11px] text-[#9CA3AF] mb-0.5">시간가치</div>
               <div className="text-[15px] font-bold text-[#2F7BF6]">
-                {effective.source === 'default' && !sp.routeParams ? '—' : `${fmt(vot)}원/분`}
+                {effective.sources.vot === 'default' && !sp.routeParams ? '—' : `${fmt(vot)}원/분`}
               </div>
             </div>
             <div className="text-center">
               <div className="text-[11px] text-[#9CA3AF] mb-0.5">환승 1회</div>
-              <div className="text-[15px] font-bold text-[#22C55E]">{transferMin != null ? `${transferMin.toFixed(1)}분` : '—'}</div>
+              <div className="text-[15px] font-bold text-[#22C55E]">{`${transferMin.toFixed(1)}분`}</div>
             </div>
             <div className="text-center">
               <div className="text-[11px] text-[#9CA3AF] mb-0.5">택시 체감</div>
-              <div className="text-[15px] font-bold text-[#FF6B3D]">{taxiW != null ? taxiW.toFixed(2) : '—'}</div>
+              <div className="text-[15px] font-bold text-[#FF6B3D]">{taxiW.toFixed(2)}</div>
             </div>
           </div>
         </div>
@@ -1814,6 +1839,115 @@ function SPProfileScreen({ onNav }: { onNav: (s: Screen) => void }) {
               </div>
             </div>
           ))}
+        </div>
+
+        <div className="bg-white rounded-2xl border border-[#E5E7EB] overflow-hidden">
+          <button
+            type="button"
+            onClick={() => setAdvancedOpen(open => !open)}
+            className="w-full px-4 py-3.5 flex items-center justify-between"
+          >
+            <span className="text-[15px] font-semibold text-[#111827]">고급 설정</span>
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" className={advancedOpen ? 'rotate-90' : ''}>
+              <path d="M6 12L10 8L6 4" stroke="#9CA3AF" strokeWidth="1.5" strokeLinecap="round"/>
+            </svg>
+          </button>
+          {advancedOpen && (
+            <div className="px-4 pb-4 space-y-4 border-t border-[#F3F4F6] pt-3">
+              <div className="rounded-xl bg-[#F9FAFB] px-3 py-3">
+                <div className="flex items-center justify-between mb-1">
+                  <div>
+                    <span className="text-[13px] font-semibold text-[#111827]">여유 지하철 체감</span>
+                    <span className="ml-1.5 text-[10px] text-[#9CA3AF]">beta_sub</span>
+                  </div>
+                  {sourceBadge('default')}
+                </div>
+                <div className="text-[11px] text-[#9CA3AF] mb-2">기준값이라 수정할 수 없어요. 다른 체감은 이 1.0을 기준으로 비교해요.</div>
+                <div className="text-[15px] font-bold text-[#6B7280]">1.0</div>
+              </div>
+              {MANUAL_COEFFS.map(spec => {
+                const value = effective.params[spec.key]
+                const draft = coeffDraft[spec.key] ?? String(value)
+                return (
+                  <div key={spec.key} className="rounded-xl border border-[#F3F4F6] px-3 py-3">
+                    <div className="flex items-center justify-between mb-1">
+                      <div>
+                        <span className="text-[13px] font-semibold text-[#111827]">{spec.label}</span>
+                        <span className="ml-1.5 text-[10px] text-[#9CA3AF]">{spec.key}</span>
+                      </div>
+                      {sourceBadge(effective.sources[spec.key])}
+                    </div>
+                    <div className="text-[11px] text-[#9CA3AF] mb-2">{spec.hint(value)}</div>
+                    <input
+                      type="range"
+                      min={spec.min}
+                      max={spec.max}
+                      step={spec.step}
+                      value={value}
+                      aria-label={spec.label}
+                      onChange={event => {
+                        const parsed = parseManualCoeff(spec.key, Number(event.target.value))
+                        if (parsed == null) return
+                        sp.setManualCoeff(spec.key, parsed)
+                        setCoeffDraft(current => ({ ...current, [spec.key]: String(parsed) }))
+                        setCoeffError(current => ({ ...current, [spec.key]: undefined }))
+                      }}
+                      className="w-full"
+                    />
+                    <div className="mt-2 flex items-center gap-2">
+                      <input
+                        type="text"
+                        inputMode="decimal"
+                        value={draft}
+                        onChange={event => {
+                          const next = event.target.value.replace(/[^\d.]/g, '')
+                          setCoeffDraft(current => ({ ...current, [spec.key]: next }))
+                          const parsed = parseManualCoeff(spec.key, next)
+                          if (parsed == null) {
+                            setCoeffError(current => ({ ...current, [spec.key]: `${spec.min}~${spec.max} 사이만 저장돼요` }))
+                            return
+                          }
+                          sp.setManualCoeff(spec.key, parsed)
+                          setCoeffError(current => ({ ...current, [spec.key]: undefined }))
+                        }}
+                        className="w-24 rounded-lg border border-[#E5E7EB] px-2 py-1.5 text-[13px] text-[#374151] outline-none"
+                      />
+                      {spec.unit ? <span className="text-[12px] text-[#9CA3AF]">{spec.unit}</span> : null}
+                      <button
+                        type="button"
+                        onClick={() => {
+                          sp.setManualCoeff(spec.key, null)
+                          setCoeffDraft(current => {
+                            const next = { ...current }
+                            delete next[spec.key]
+                            return next
+                          })
+                          setCoeffError(current => ({ ...current, [spec.key]: undefined }))
+                        }}
+                        className="ml-auto text-[12px] font-medium text-[#6B7280]"
+                      >
+                        되돌리기
+                      </button>
+                    </div>
+                    {coeffError[spec.key] && (
+                      <div className="mt-1 text-[11px] text-[#EF4444]">{coeffError[spec.key]}</div>
+                    )}
+                  </div>
+                )
+              })}
+              <button
+                type="button"
+                onClick={() => {
+                  sp.resetManualParams()
+                  setCoeffDraft({})
+                  setCoeffError({})
+                }}
+                className="w-full py-3 border border-[#E5E7EB] rounded-xl text-[14px] font-medium text-[#6B7280] bg-white"
+              >
+                설문 추정값으로 초기화
+              </button>
+            </div>
+          )}
         </div>
 
         <button
@@ -2786,6 +2920,12 @@ export default function App() {
     const stored = readStorage<number | null>(MANUAL_VOT_KEY)
     return typeof stored === 'number' ? stored : null
   })
+  const [manualParams, setManualParamsState] = useState<ManualParams>(() => {
+    const dedicated = sanitizeManualParams(readStorage(MANUAL_PARAMS_KEY))
+    if (Object.keys(dedicated).length) return dedicated
+    const store = readStorage<{ manual_params?: unknown }>(USER_STORE_KEY)
+    return sanitizeManualParams(store?.manual_params)
+  })
   const [displayAge, setDisplayAge] = useState(storedProfile?.display_age || storedProfile?.age_group || '')
   const [displayPurpose, setDisplayPurpose] = useState(storedProfile?.display_purpose || storedProfile?.purpose || '')
   const [questionCount, setQuestionCount] = useState(storedProfile?.length || 0)
@@ -2800,7 +2940,29 @@ export default function App() {
   const setManualVot = (value: number | null) => {
     setManualVotState(value)
     writeStorage(MANUAL_VOT_KEY, value)
-    persistUserStore(value, profile, routeParams)
+    persistUserStore(value, profile, routeParams, manualParams)
+  }
+
+  const persistManualParams = (next: ManualParams) => {
+    writeStorage(MANUAL_PARAMS_KEY, next)
+    persistUserStore(manualVot, profile, routeParams, next)
+  }
+
+  const setManualCoeff = (key: ManualCoeffKey, value: number | null) => {
+    if (value != null && parseManualCoeff(key, value) == null) return false
+    setManualParamsState(prev => {
+      const next: ManualParams = { ...prev }
+      if (value == null) delete next[key]
+      else next[key] = value
+      persistManualParams(next)
+      return next
+    })
+    return true
+  }
+
+  const resetManualParams = () => {
+    setManualParamsState({})
+    persistManualParams({})
   }
 
   const setDepartNow = () => {
@@ -2872,7 +3034,7 @@ export default function App() {
       setRouteParams(result.route_params)
       writeStorage(PROFILE_KEY, savedProfile)
       writeStorage(PARAMS_KEY, result.route_params)
-      persistUserStore(manualVot, savedProfile, result.route_params)
+      persistUserStore(manualVot, savedProfile, result.route_params, manualParams)
     } catch (error) {
       if (id !== estimateId.current) return
       setEstimateError(error instanceof Error ? error.message : '추정에 실패했습니다.')
@@ -2901,6 +3063,7 @@ export default function App() {
     setAppliedLimits(null)
     const effective = getEffectiveParams({
       manualVot,
+      manualParams,
       routeParams,
       usePersonal,
     })
@@ -3031,6 +3194,9 @@ export default function App() {
     restartSurvey,
     manualVot,
     setManualVot,
+    manualParams,
+    setManualCoeff,
+    resetManualParams,
   }
 
   const screens: Record<Screen, React.ReactNode> = {
