@@ -276,6 +276,18 @@ function seoulIso(date: Date) {
   return `${pick('year')}-${pick('month')}-${pick('day')}T${hour}:${pick('minute')}:${pick('second')}+09:00`
 }
 
+function resolveDepartIso(options: {
+  departTime?: string | null
+  scheduledDepart?: string | null
+  departMode?: 'now' | 'scheduled'
+  applied?: string | null
+}) {
+  if (options.departTime) return options.departTime
+  if (options.applied) return options.applied
+  if (options.departMode === 'scheduled' && options.scheduledDepart) return options.scheduledDepart
+  return seoulIso(new Date())
+}
+
 function seoulParts(iso: string | null) {
   const d = iso ? new Date(iso) : new Date()
   const parts = new Intl.DateTimeFormat('en-CA', {
@@ -665,15 +677,15 @@ function SegmentBar({
   // px constants
   const ICON = 16   // icon badge size
   const GAP  = 2    // icon↔text gap
-  const WALK_MIN = 26  // "99분" at 10px + 4px side pads ≈ 26px
-  const VEH_MIN  = ICON + GAP + 24 + 8  // icon + gap + "99분" + side pads ≈ 50px
+  const WALK_MIN = 18
+  const VEH_MIN  = 28
 
   return (
-    <div style={{ width: '100%' }}>
+    <div style={{ width: '100%', maxWidth: '100%', overflow: 'hidden' }}>
       <div
         style={{
           display: 'flex', height: 22, borderRadius: 11, overflow: 'hidden',
-          background: '#EEF1F4', width: `${scaleFrac * 100}%`,
+          background: '#EEF1F4', width: `${scaleFrac * 100}%`, maxWidth: '100%',
         }}
       >
         {merged.map((s, i) => {
@@ -690,6 +702,7 @@ function SegmentBar({
                   flexShrink: 1,
                   flexBasis: 0,
                   minWidth: WALK_MIN,
+                  overflow: 'hidden',
                   display: 'flex', alignItems: 'center', justifyContent: 'center',
                 }}
               >
@@ -753,6 +766,7 @@ function SegmentSummary({ segments }: { segments: Segment[] }) {
   return (
     <div style={{
       marginTop: 6,
+      maxWidth: '100%',
       overflowX: 'auto',
       msOverflowStyle: 'none',
       scrollbarWidth: 'none',
@@ -766,9 +780,9 @@ function SegmentSummary({ segments }: { segments: Segment[] }) {
             {i > 0 && (
               <span style={{ color: '#C4CAD2', fontSize: 11, padding: '0 4px', flexShrink: 0 }}>›</span>
             )}
-            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: 12, lineHeight: 1.6 }}>
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: 12, lineHeight: 1.6, maxWidth: 160 }}>
               <ModeIcon mode={v.mode} color={v.color} size={12} />
-              <span style={{ color: v.color, fontWeight: 600 }}>{v.label}</span>
+              <span style={{ color: v.color, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 110 }}>{v.label}</span>
               <span style={{ color: '#4B5563', fontVariantNumeric: 'tabular-nums' }}>{v.duration}분</span>
             </span>
           </span>
@@ -944,10 +958,10 @@ function PlaceSuggestList({
             key={`${place.name}-${place.lat}-${place.lng}-${index}`}
             onMouseDown={event => event.preventDefault()}
             onClick={() => onSelect(place)}
-            className="w-full px-4 py-2.5 text-left hover:bg-[#F9FAFB]"
+            className="w-full min-w-0 px-4 py-2.5 text-left hover:bg-[#F9FAFB]"
           >
-            <div className="text-[14px] font-semibold text-[#111827]">{place.name}</div>
-            <div className="text-[12px] text-[#9CA3AF]">{place.address}</div>
+            <div className="truncate text-[14px] font-semibold text-[#111827]">{place.name}</div>
+            <div className="truncate text-[12px] text-[#9CA3AF]">{place.address}</div>
           </button>
         ))
       )}
@@ -1008,7 +1022,7 @@ function DepartSheet({
           <select
             value={hour}
             onChange={event => setHour(Number(event.target.value))}
-            className="flex-1 rounded-xl border border-[#E5E7EB] bg-white px-3 py-2.5 text-[14px] text-[#374151] outline-none"
+            className="min-h-11 flex-1 rounded-xl border border-[#E5E7EB] bg-white px-3 py-2 text-[16px] text-[#374151] outline-none"
           >
             {Array.from({ length: 24 }, (_, h) => (
               <option key={h} value={h}>{String(h).padStart(2, '0')}시</option>
@@ -1017,7 +1031,7 @@ function DepartSheet({
           <select
             value={minute}
             onChange={event => setMinute(Number(event.target.value))}
-            className="flex-1 rounded-xl border border-[#E5E7EB] bg-white px-3 py-2.5 text-[14px] text-[#374151] outline-none"
+            className="min-h-11 flex-1 rounded-xl border border-[#E5E7EB] bg-white px-3 py-2 text-[16px] text-[#374151] outline-none"
           >
             {[0, 10, 20, 30, 40, 50].map(m => (
               <option key={m} value={m}>{String(m).padStart(2, '0')}분</option>
@@ -1092,7 +1106,7 @@ function HomeScreen({ onNav }: { onNav: (s: Screen) => void }) {
             <div className="relative flex items-center gap-3 px-4 py-3.5 pr-12 border-b border-[#F3F4F6]">
               <div className="w-2.5 h-2.5 rounded-full border-2 border-[#9CA3AF] flex-shrink-0" />
               <input
-                className="flex-1 text-[14px] text-[#374151] outline-none placeholder-[#9CA3AF] bg-transparent"
+                className="min-w-0 flex-1 text-[16px] text-[#374151] outline-none placeholder-[#9CA3AF] bg-transparent"
                 placeholder="출발지를 입력하세요"
                 value={originQuery}
                 onFocus={() => setActiveField('origin')}
@@ -1118,7 +1132,7 @@ function HomeScreen({ onNav }: { onNav: (s: Screen) => void }) {
             <div className="relative flex items-center gap-3 px-4 py-3.5 pr-12">
               <div className="w-2.5 h-2.5 rounded-full bg-[#2F7BF6] flex-shrink-0" />
               <input
-                className="flex-1 text-[14px] text-[#374151] outline-none placeholder-[#9CA3AF] bg-transparent"
+                className="min-w-0 flex-1 text-[16px] text-[#374151] outline-none placeholder-[#9CA3AF] bg-transparent"
                 placeholder="도착지를 입력하세요"
                 value={destinationQuery}
                 onFocus={() => setActiveField('destination')}
@@ -1331,7 +1345,7 @@ function SPSetupScreen({ onNav }: { onNav: (s: Screen) => void }) {
               inputMode="numeric"
               value={vot}
               onChange={e => { setVot(e.target.value.replace(/[^\d.]/g, '')); setVotError('') }}
-              className="flex-1 px-4 py-3 text-[15px] font-medium text-[#374151] outline-none bg-transparent"
+              className="min-w-0 flex-1 bg-transparent px-4 py-3 text-[16px] font-medium text-[#374151] outline-none"
             />
             <span className="pr-4 text-[13px] text-[#9CA3AF]">원/분</span>
           </div>
@@ -1938,7 +1952,7 @@ function SPProfileScreen({ onNav, startAdvanced = false, backTo = 'home' }: { on
               inputMode="numeric"
               value={manualDraft}
               onChange={event => { setManualDraft(event.target.value.replace(/[^\d.]/g, '')); setManualError('') }}
-              className="flex-1 px-4 py-3 text-[15px] font-medium text-[#374151] outline-none bg-transparent"
+              className="min-w-0 flex-1 bg-transparent px-4 py-3 text-[16px] font-medium text-[#374151] outline-none"
               placeholder="원/분"
             />
             <span className="pr-4 text-[13px] text-[#9CA3AF]">원/분</span>
@@ -2107,7 +2121,7 @@ function SPProfileScreen({ onNav, startAdvanced = false, backTo = 'home' }: { on
                           sp.setManualCoeff(spec.key, parsed)
                           setCoeffError(current => ({ ...current, [spec.key]: undefined }))
                         }}
-                        className="w-24 rounded-lg border border-[#E5E7EB] px-2 py-1.5 text-[13px] text-[#374151] outline-none"
+                        className="h-10 w-28 rounded-lg border border-[#E5E7EB] px-2 py-2 text-[16px] text-[#374151] outline-none"
                       />
                       {spec.unit ? <span className="text-[12px] text-[#9CA3AF]">{spec.unit}</span> : null}
                       <button
@@ -2174,18 +2188,18 @@ function SearchInputScreen({ onNav }: { onNav: (s: Screen) => void }) {
         <div className="border border-[#E5E7EB] rounded-2xl overflow-hidden">
           <div className="flex items-center gap-3 px-4 py-3.5 border-b border-[#F3F4F6]">
             <div className="w-2.5 h-2.5 rounded-full border-2 border-[#9CA3AF]" />
-            <input className="flex-1 text-[14px] text-[#374151] outline-none bg-transparent" value={origin} onChange={e => setOrigin(e.target.value)} />
+            <input className="min-w-0 flex-1 bg-transparent text-[16px] text-[#374151] outline-none" value={origin} onChange={e => setOrigin(e.target.value)} />
           </div>
           <div className="flex items-center gap-3 px-4 py-3.5">
             <div className="w-2.5 h-2.5 rounded-full bg-[#2F7BF6]" />
-            <input className="flex-1 text-[14px] text-[#374151] outline-none bg-transparent" value={dest} onChange={e => setDest(e.target.value)} />
+            <input className="min-w-0 flex-1 bg-transparent text-[16px] text-[#374151] outline-none" value={dest} onChange={e => setDest(e.target.value)} />
           </div>
         </div>
 
         {/* Time */}
         <div className="border border-[#E5E7EB] rounded-xl px-4 py-3 flex items-center gap-3">
           <span className="text-[#9CA3AF]">🕐</span>
-          <input type="datetime-local" value={time} onChange={e => setTime(e.target.value)} className="flex-1 text-[14px] text-[#374151] outline-none bg-transparent" />
+          <input type="datetime-local" value={time} onChange={e => setTime(e.target.value)} className="min-w-0 flex-1 bg-transparent text-[16px] text-[#374151] outline-none" />
         </div>
 
         <button onClick={() => onNav('reservation')} className="w-full py-4 bg-[#2F7BF6] rounded-xl text-white font-semibold text-[15px]">
@@ -2212,20 +2226,24 @@ function SearchInputScreen({ onNav }: { onNav: (s: Screen) => void }) {
 function AnalyzingScreen({ onNav }: { onNav: (s: Screen) => void }) {
   const trip = useTrip()
   const finishing = useRef(false)
+  const tripRef = useRef(trip)
+  tripRef.current = trip
   const progress = trip.analyzeProgress
   const stage = trip.analyzeStage || '서버를 깨우는 중이에요'
 
   const finishSearch = () => {
     if (finishing.current) return
     finishing.current = true
-    trip
+    const current = tripRef.current
+    current
       .waitForAnalyze()
       .then(async data => {
-        const limits = trip.pendingLimits
+        const latest = tripRef.current
+        const limits = latest.pendingLimits
         if (hasLimits(limits) && limits) {
-          await trip.applyRank(limits, data.candidates)
+          await latest.applyRank(limits, data.candidates)
         } else {
-          trip.clearRanking()
+          latest.clearRanking()
         }
         onNav('results')
       })
@@ -2304,12 +2322,12 @@ function AnalyzingScreen({ onNav }: { onNav: (s: Screen) => void }) {
         <div className="w-full space-y-2">
           <div className="flex items-center gap-2">
             <div className="w-2.5 h-2.5 rounded-full border-2 border-[#9CA3AF]" />
-            <span className="text-[13px] text-[#374151]">{trip.origin?.name ?? '출발지'}</span>
+            <span className="min-w-0 truncate text-[13px] text-[#374151]">{trip.origin?.name ?? '출발지'}</span>
           </div>
           <div className="ml-1.5 w-0.5 h-4 bg-[#E5E7EB]" />
           <div className="flex items-center gap-2">
             <div className="w-2.5 h-2.5 rounded-full bg-[#2F7BF6]" />
-            <span className="text-[13px] text-[#374151]">{trip.destination?.name ?? '도착지'}</span>
+            <span className="min-w-0 truncate text-[13px] text-[#374151]">{trip.destination?.name ?? '도착지'}</span>
           </div>
         </div>
       </div>
@@ -2395,8 +2413,8 @@ function ResultsScreen({ onNav }: { onNav: NavTo }) {
         </div>
       </div>
 
-        <div className="flex items-center justify-between px-4 py-2 border-b border-[#F3F4F6]">
-        <button type="button" onClick={() => onNav('home')} className="text-[12px] font-semibold text-[#374151]">
+        <div className="flex min-w-0 items-center justify-between gap-2 px-4 py-2 border-b border-[#F3F4F6]">
+        <button type="button" onClick={() => onNav('home')} className="min-w-0 flex-1 truncate text-left text-[12px] font-semibold text-[#374151]">
           {trip.appliedLimits?.arrive_by
             ? `출발 ${clockLabel(trip.departTime)} → 도착 희망 ${clockLabel(trip.appliedLimits.arrive_by)}`
             : `출발 ${clockLabel(trip.departTime)} → 도착 예정 ${rank1 ? clockAfter(trip.departTime, rank1.total_time) : '--:--'}`}
@@ -2404,7 +2422,7 @@ function ResultsScreen({ onNav }: { onNav: NavTo }) {
         <button
           type="button"
           onClick={() => onNav('reservation')}
-          className="max-w-[70%] truncate rounded-full bg-[#EAF2FF] px-3 py-1 text-[12px] font-semibold text-[#2F7BF6]"
+          className="max-w-[48%] shrink-0 truncate rounded-full bg-[#EAF2FF] px-3 py-1 text-[12px] font-semibold text-[#2F7BF6]"
         >
           {limitsSummary(trip.appliedLimits) || '조건 없음'}
         </button>
@@ -2502,6 +2520,7 @@ function ResultsScreen({ onNav }: { onNav: NavTo }) {
                         height: 22, display: 'inline-flex', alignItems: 'center',
                         padding: '0 8px', borderRadius: 4,
                         fontSize: 12, fontWeight: 600,
+                        maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
                         background: t === '추천' ? '#EAF2FE' : '#F2F4F7',
                         color: t === '추천' ? '#2F7BF6' : '#4B5563',
                       }}>{t}</span>
@@ -2606,9 +2625,9 @@ function DetailScreen({ onNav }: { onNav: (s: Screen) => void }) {
         <button onClick={() => onNav('results')}>
           <svg width="18" height="18" viewBox="0 0 18 18" fill="none"><path d="M11 14L6 9L11 4" stroke="#111827" strokeWidth="1.75" strokeLinecap="round"/></svg>
         </button>
-        <div>
-          <div className="text-[11px] text-[#9CA3AF]">{originName}</div>
-          <div className="text-[11px] text-[#2F7BF6]">● {destName}</div>
+        <div className="min-w-0 flex-1">
+          <div className="truncate text-[11px] text-[#9CA3AF]">{originName}</div>
+          <div className="truncate text-[11px] text-[#2F7BF6]">● {destName}</div>
         </div>
         <button className="ml-auto text-[#9CA3AF]" onClick={() => onNav('results')}>✕</button>
       </div>
@@ -2641,11 +2660,11 @@ function DetailScreen({ onNav }: { onNav: (s: Screen) => void }) {
             </div>
             {/* Content */}
             <div className={`flex-1 pb-4 ${item.taxi ? 'bg-[#FFF7ED] -mx-2 px-3 py-2 rounded-xl border border-[#FED7AA]' : ''}`}>
-              <div className={`text-[13px] text-[#111827] ${item.station ? 'font-bold' : 'font-medium'}`}>
+              <div className={`break-words text-[13px] text-[#111827] ${item.station ? 'font-bold' : 'font-medium'}`}>
                 {item.taxi && <span className="text-[#FF6B3D] font-semibold">🚕 여기서 택시로 환승 · </span>}
                 {item.label}
               </div>
-              {item.sub && <div className="text-[11px] text-[#9CA3AF]">{item.sub}</div>}
+              {item.sub && <div className="break-words text-[11px] text-[#9CA3AF]">{item.sub}</div>}
               {item.badge && (
                 <div className="inline-flex items-center gap-1 mt-1 px-2 py-0.5 rounded-full text-[10px] font-semibold text-white"
                   style={{ background: item.dot || '#374151' }}
@@ -2769,11 +2788,17 @@ function ReservationScreen({ onNav }: { onNav: NavTo }) {
 
   const collectLimits = (): RankLimits | null => {
     const limits: RankLimits = {}
+    const departIso = resolveDepartIso({
+      departTime: trip.departTime,
+      scheduledDepart: trip.scheduledDepart,
+      departMode: trip.departMode,
+      applied: trip.analysis?.applied_depart_time,
+    })
     if (enabled.duration && maxTime.trim()) limits.max_time_min = Number(maxTime)
     if (enabled.cost) limits.max_cost_krw = maxCost
     if (enabled.transfer) limits.max_transfers = transferLimit
-    if (enabled.time) limits.arrive_by = arrivalToIso(trip.departTime, arrivalTime)
-    if (trip.departTime) limits.depart_time = trip.departTime
+    if (enabled.time) limits.arrive_by = arrivalToIso(departIso, arrivalTime)
+    if (enabled.time || hasLimits(limits)) limits.depart_time = departIso
     if (!hasLimits(limits)) return null
     limits.importance = importanceForLimits(limits, importance)
     return limits
@@ -2817,8 +2842,8 @@ function ReservationScreen({ onNav }: { onNav: NavTo }) {
         </div>
         <div className="rounded-2xl bg-white p-4 shadow-[0_2px_14px_rgba(15,23,42,0.05)]">
           <div className="flex items-center gap-2">
-            <span className="flex-1 text-[15px] font-semibold text-[#182230]">도착 시간</span>
-            <span className={`text-[13px] font-semibold ${enabled.time ? 'text-[#2F7BF6]' : 'text-[#8A94A6]'}`}>
+            <span className="shrink-0 text-[15px] font-semibold text-[#182230]">도착 시간</span>
+            <span className={`min-w-0 flex-1 truncate text-right text-[13px] font-semibold ${enabled.time ? 'text-[#2F7BF6]' : 'text-[#8A94A6]'}`}>
               {enabled.time
                 ? `${isArriveNextDay(trip.departTime, arrivalTime) ? '다음 날 ' : ''}${arrivalTime}까지 (${arriveBudgetMin(trip.departTime, arrivalTime)}분 이내)`
                 : '상관없음'}
@@ -2904,7 +2929,7 @@ function ReservationScreen({ onNav }: { onNav: NavTo }) {
                 placeholder={timeHint || '최대 소요시간 (분)'}
                 value={maxTime}
                 onChange={event => setMaxTime(event.target.value)}
-                className="mt-4 w-full rounded-xl bg-[#F7F9FC] px-4 py-3 text-[14px] text-[#182230] outline-none placeholder-[#9CA3AF]"
+                className="mt-4 w-full rounded-xl bg-[#F7F9FC] px-4 py-3 text-[16px] text-[#182230] outline-none placeholder-[#9CA3AF]"
               />
               <ImportanceCard
                 value={importance.time || 'mid'}
@@ -3407,6 +3432,7 @@ export default function App() {
       .then(result => {
         if (id !== requestId.current) throw new Error('stale')
         analysisRef.current = result
+        if (result.applied_depart_time) setDepartTime(result.applied_depart_time)
         setAnalysis(result)
         return result
       })
@@ -3456,9 +3482,16 @@ export default function App() {
         time: limits.importance?.time ?? conditionImportance.time,
         cost: limits.importance?.cost ?? conditionImportance.cost,
       })
+      const departIso = resolveDepartIso({
+        departTime: limits.depart_time || departTime,
+        scheduledDepart,
+        departMode,
+        applied: analysisRef.current?.applied_depart_time,
+      })
+      if (!departTime) setDepartTime(departIso)
       const withImportance = {
         ...limits,
-        depart_time: limits.depart_time || departTime,
+        depart_time: departIso,
         importance: importanceForLimits(limits, prefs),
       }
       const result = await rankRoutes(source, withImportance, { gc: rankingBetas.gc, knee: rankingBetas.knee })
@@ -3573,7 +3606,7 @@ export default function App() {
     <TripContext.Provider value={trip}>
       <SpContext.Provider value={sp}>
         <div className="min-h-dvh bg-[#E8EAEF] flex justify-center">
-          <div className="relative w-full max-w-[430px] h-dvh overflow-hidden bg-white">
+          <div className="relative h-dvh w-full max-w-[430px] overflow-x-hidden overflow-y-hidden bg-white">
             {screens[screen]}
           </div>
         </div>
