@@ -1700,7 +1700,7 @@ function SPCompleteScreen({ onNav }: { onNav: (s: Screen) => void }) {
     { label: '버스 체감', value: feelLine('버스', weights.bus ?? params.alpha_bus), color: '#374151' },
     { label: '택시 체감', value: feelLine('택시', weights.taxi ?? params.delta_taxi), color: '#FF6B3D' },
     { label: '도보 체감', value: feelLine('도보', weights.walk ?? params.gamma_walk), color: '#374151' },
-    { label: '환승 1회', value: `${(weights.transfer_min ?? params.transfer_penalty).toFixed(1)}분`, color: '#22C55E' },
+    { label: '환승 1회', value: `${(weights.transfer_min ?? params.transfer_penalty).toFixed(2)}분`, color: '#22C55E' },
   ] : []
 
   return (
@@ -1908,7 +1908,7 @@ function SPProfileScreen({ onNav, startAdvanced = false, backTo = 'home' }: { on
     { key: 'taxi', label: '택시 체감', hint: feelLine('택시', taxiW!), value: (taxiW!).toFixed(2), bar: Math.min((taxiW! / 3) * 100, 100), color: '#FF6B3D' },
     { key: 'bus', label: '버스 체감', hint: feelLine('버스', weights.bus ?? params.alpha_bus), value: (weights.bus ?? params.alpha_bus).toFixed(2), bar: Math.min(((weights.bus ?? params.alpha_bus) / 3) * 100, 100), color: '#374151' },
     { key: 'walk', label: '도보 체감', hint: feelLine('도보', weights.walk ?? params.gamma_walk), value: (weights.walk ?? params.gamma_walk).toFixed(2), bar: Math.min(((weights.walk ?? params.gamma_walk) / 3) * 100, 100), color: '#374151' },
-    { key: 'tr', label: '환승 1회', hint: `환승 1회 = ${(transferMin!).toFixed(1)}분`, value: `${(transferMin!).toFixed(1)}분`, bar: Math.min((transferMin! / 20) * 100, 100), color: '#22C55E' },
+    { key: 'tr', label: '환승 1회', hint: `환승 1회 = ${(transferMin!).toFixed(2)}분`, value: `${(transferMin!).toFixed(2)}분`, bar: Math.min((transferMin! / 20) * 100, 100), color: '#22C55E' },
   ] : []
 
   return (
@@ -2003,7 +2003,7 @@ function SPProfileScreen({ onNav, startAdvanced = false, backTo = 'home' }: { on
             </div>
             <div className="text-center">
               <div className="text-[11px] text-[#9CA3AF] mb-0.5">환승 1회</div>
-              <div className="text-[15px] font-bold text-[#22C55E]">{`${transferMin.toFixed(1)}분`}</div>
+              <div className="text-[15px] font-bold text-[#22C55E]">{`${transferMin.toFixed(2)}분`}</div>
             </div>
             <div className="text-center">
               <div className="text-[11px] text-[#9CA3AF] mb-0.5">택시 체감</div>

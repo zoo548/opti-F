@@ -993,7 +993,7 @@ _ENGINE_DEFAULTS = {
     "beta_sub_c": 1.55,
     "gamma_walk": 2.35,
     "delta_taxi": 0.88,
-    "transfer_penalty": 5.0,
+    "transfer_penalty": 11.24,
 }
 
 

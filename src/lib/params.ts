@@ -15,7 +15,7 @@ export const DEFAULT_ROUTE_PARAMS: RouteParams = {
   beta_sub_c: 1.55,
   gamma_walk: 2.35,
   delta_taxi: 0.88,
-  transfer_penalty: 5.0,
+  transfer_penalty: 11.24,
 }
 
 export type ParamSource = 'manual' | 'survey' | 'default'
@@ -76,8 +76,8 @@ export const MANUAL_COEFFS: {
     unit: '분',
     min: 0,
     max: 30,
-    step: 0.5,
-    hint: value => `환승 한 번을 ${value.toFixed(0)}분 더 걸린 것처럼 반영해요`,
+    step: 0.01,
+    hint: value => `환승 한 번을 ${value.toFixed(2)}분 더 걸린 것처럼 반영해요`,
   },
 ]
 

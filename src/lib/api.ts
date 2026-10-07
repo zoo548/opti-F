@@ -263,7 +263,7 @@ export function analyzeRoutes(
 
   return (async () => {
     const job = await apiPost<{ job_id: string }>('/routes/analyze/jobs', body, 20_000)
-    const deadline = Date.now() + 180_000
+    const deadline = Date.now() + 300_000
     while (true) {
       const status = await apiGet<AnalyzeJobStatus>(`/routes/analyze/jobs/${job.job_id}`)
       onProgress?.({
