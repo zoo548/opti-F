@@ -5,6 +5,8 @@ import os
 import threading
 import time
 from datetime import datetime
+
+from core.timeutil import now_seoul, parse_iso_to_seoul
 from uuid import uuid4
 from concurrent.futures import ThreadPoolExecutor
 
@@ -71,6 +73,7 @@ class RankLimitsIn(BaseModel):
     max_cost_krw: float | None = None
     max_transfers: float | None = None
     arrive_by: str | None = None
+    depart_time: str | None = None
 
 
 class RankBetasIn(BaseModel):
@@ -91,6 +94,7 @@ class RankIn(BaseModel):
     betas: RankBetasIn | dict | None = None
     importance: RankImportanceIn | dict | None = None
     psi: float | None = Field(default=0.0)
+    depart_time: str | None = None
 
 
 class SurveyIn(BaseModel):
@@ -107,14 +111,10 @@ class EstimateIn(BaseModel):
 
 def _parse_depart(value: str | None) -> datetime:
     if not value:
-        return datetime.now()
-    text = value.strip().replace("Z", "+00:00")
-    try:
-        parsed = datetime.fromisoformat(text)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail="출발 시각 형식을 확인할 수 없습니다.") from exc
-    if parsed.tzinfo is not None:
-        parsed = parsed.astimezone().replace(tzinfo=None)
+        return now_seoul()
+    parsed = parse_iso_to_seoul(value)
+    if parsed is None:
+        raise HTTPException(status_code=400, detail="출발 시각 형식을 확인할 수 없습니다.")
     return parsed
 
 
@@ -225,9 +225,13 @@ def routes_rank(body: RankIn):
         if body.importance is not None:
             raw_imp = body.importance.model_dump() if hasattr(body.importance, "model_dump") else dict(body.importance)
             importance = {k: v for k, v in raw_imp.items() if v is not None} or None
+        limits = body.limits.model_dump()
+        depart_time = body.depart_time or limits.get("depart_time")
+        if depart_time:
+            limits["depart_time"] = depart_time
         return rank_routes(
             candidates=body.candidates,
-            limits=body.limits.model_dump(),
+            limits=limits,
             weights=body.weights,
             psi=0.0 if body.psi is None else body.psi,
             betas=betas,

@@ -27,6 +27,7 @@ from .api_cache import (
     snapshot_stats,
 )
 from .congestion_io import load_congestion_sheets, resolve_congestion_path
+from .timeutil import format_seoul_iso, format_tmap_time, now_seoul, parse_iso_to_seoul, to_seoul
 
 log = logging.getLogger(__name__)
 
@@ -150,7 +151,8 @@ def load_congestion(path=None, verbose=True):
 
 
 def _sheet_for(dt):
-    wd = dt.weekday()
+    local = to_seoul(dt)
+    wd = local.weekday()
     return "평일" if wd <= 4 else ("토요일" if wd == 5 else "일요일")
 
 
@@ -158,6 +160,7 @@ def congestion_at(cong, line_no, station, dt, direction=None):
     """특정 역·시각의 혼잡도. 자료가 없으면 None."""
     if not cong or line_no is None:
         return None
+    dt = to_seoul(dt)
     tb = cong["table"].get(_sheet_for(dt))
     if not tb:
         return None
@@ -583,27 +586,18 @@ def _parse_tmap(js):
 
 _TMAP_PRED_LOCK = threading.Lock()
 _TMAP_PREDICTION_UNAVAILABLE = False
+_TMAP_PRED_NOTES: list[str] = []
 
 
 def _parse_depart_iso(depart_iso):
-    if not depart_iso:
-        return None
-    text = str(depart_iso).strip()
-    if len(text) >= 5 and (text[-5] in "+-") and text[-3] != ":":
-        text = text[:-2] + ":" + text[-2:]
-    text = text.replace("Z", "+00:00")
-    try:
-        return datetime.fromisoformat(text)
-    except ValueError:
-        return None
+    return parse_iso_to_seoul(depart_iso)
 
 
 def _depart_near_now(depart_iso, window_sec=30 * 60):
     dt = _parse_depart_iso(depart_iso)
     if dt is None:
         return True
-    now = datetime.now(dt.tzinfo) if dt.tzinfo else datetime.now()
-    return abs((dt - now).total_seconds()) <= window_sec
+    return abs((dt - now_seoul()).total_seconds()) <= window_sec
 
 
 def _tmap_pred_unavailable():
@@ -615,6 +609,21 @@ def _mark_tmap_pred_unavailable():
     global _TMAP_PREDICTION_UNAVAILABLE
     with _TMAP_PRED_LOCK:
         _TMAP_PREDICTION_UNAVAILABLE = True
+
+
+def _note_tmap_pred(note: str):
+    with _TMAP_PRED_LOCK:
+        _TMAP_PRED_NOTES.append(note)
+
+
+def _tmap_pred_notes():
+    with _TMAP_PRED_LOCK:
+        return list(_TMAP_PRED_NOTES)
+
+
+def _clear_tmap_pred_notes():
+    with _TMAP_PRED_LOCK:
+        _TMAP_PRED_NOTES.clear()
 
 
 def _tmap_error_info(resp):
@@ -680,10 +689,13 @@ def tmap_taxi(tmap_key, s_lat, s_lon, e_lat, e_lon, depart_iso):
                 minutes, fare, coords = _parse_tmap(r.json())
                 return minutes, fare, coords, "prediction"
             code, msg = _tmap_error_info(r)
+            note = f"HTTP {r.status_code}" + (f" code={code}" if code else "")
+            _note_tmap_pred(note)
             log.warning("TMAP prediction HTTP %s code=%s msg=%s", r.status_code, code, msg[:120])
             if _tmap_auth_or_unsupported(r.status_code, code, msg):
                 _mark_tmap_pred_unavailable()
         except Exception as exc:
+            _note_tmap_pred(type(exc).__name__)
             log.warning("TMAP prediction error: %s", type(exc).__name__)
         try:
             minutes, fare, coords, source = _tmap_live(tmap_key, s_lat, s_lon, e_lat, e_lon)
@@ -730,8 +742,8 @@ def _tmap_bucket(depart_iso, fallback_sheet, fallback_hour):
     dt = _parse_depart_iso(depart_iso)
     if dt is None:
         return fallback_sheet, fallback_hour
-    naive = dt.replace(tzinfo=None) if dt.tzinfo else dt
-    return _sheet_for(naive), naive.strftime("%H")
+    local = to_seoul(dt)
+    return _sheet_for(local), local.strftime("%H")
 
 
 def _lanes_to_cache(lanes):
@@ -822,6 +834,7 @@ class _ApiMeter:
         self.tmap_n = 0
         self.tmap_s = 0.0
         self.tmap_live_fallback = 0
+        self.tmap_pred_ok = 0
         self.odsay_cache = {}
         self.tmap_cache = {}
 
@@ -878,6 +891,8 @@ class _ApiMeter:
             self.tmap_s += dt
             if source == "live_fallback":
                 self.tmap_live_fallback += 1
+            if source == "prediction":
+                self.tmap_pred_ok += 1
             self.tmap_cache[ck] = result
         if minutes is not None:
             cache_set(pkey, "tmap", _tmap_to_cache(minutes, fare, coords), TTL_TMAP_SEC)
@@ -910,7 +925,7 @@ def collect_alternatives(P, origin, dest, cong, progress_cb=None):
             except Exception:
                 pass
 
-    dep_iso = P["dep_dt"].strftime("%Y-%m-%dT%H:%M:%S+0900")
+    dep_iso = format_tmap_time(P["dep_dt"])
     thr = P["threshold"]
     max_cand = _resolve_max_cand(P)
 
@@ -1010,7 +1025,7 @@ def collect_alternatives(P, origin, dest, cong, progress_cb=None):
         leg = sorted(legs, key=lambda p: p["info"]["totalTime"])[0]
         lsegs, lagg = transit_segments(P["odsay_key"], leg, P["dep_dt"], cong, thr)
         t_min = lagg["총시간"]
-        taxi_iso = (P["dep_dt"] + timedelta(minutes=t_min)).strftime("%Y-%m-%dT%H:%M:%S+0900")
+        taxi_iso = format_tmap_time(P["dep_dt"] + timedelta(minutes=t_min))
         stt, stf, st_coords = meter.taxi(P["tmap_key"], clat, clon, dest["lat"], dest["lon"], taxi_iso)
         if stt is None:
             return None
@@ -1094,6 +1109,7 @@ def collect_alternatives(P, origin, dest, cong, progress_cb=None):
     stats["tmap_n"] = meter.tmap_n
     stats["tmap_s"] = meter.tmap_s
     stats["tmap_live_fallback"] = meter.tmap_live_fallback
+    stats["tmap_pred_ok"] = meter.tmap_pred_ok
     log.info(
         f"  ODsay 호출 {meter.odsay_n}회 / {meter.odsay_s:.2f}s, "
         f"TMAP 호출 {meter.tmap_n}회 / {meter.tmap_s:.2f}s, "
@@ -1410,7 +1426,8 @@ def analyze_routes(
 
     report(1, "서버를 깨우는 중이에요")
     P = _merge_params(params)
-    P["dep_dt"] = depart_dt
+    P["dep_dt"] = to_seoul(depart_dt)
+    _clear_tmap_pred_notes()
     origin = _as_point(origin)
     dest = _as_point(dest)
 
@@ -1433,6 +1450,11 @@ def analyze_routes(
             "anchors": {"fastest": None, "cheapest": None},
             "warnings": warnings,
             "cache_stats": snapshot_stats(),
+            "applied_depart_time": format_seoul_iso(P["dep_dt"]),
+            "congestion_sheet": _sheet_for(P["dep_dt"]),
+            "congestion_clock": P["dep_dt"].strftime("%H:%M"),
+            "tmap_prediction": "none",
+            "tmap_prediction_error": None,
         }
 
     report(90, "경로를 비교하고 있어요")
@@ -1481,10 +1503,20 @@ def analyze_routes(
         )
     for k, v in sorted(ODSAY_ERRORS.items(), key=lambda x: -x[1]):
         warnings.append(f"{v}회 {k}")
-    if abs((depart_dt - datetime.now()).total_seconds()) > 15 * 60:
+    if abs((P["dep_dt"] - now_seoul()).total_seconds()) > 15 * 60:
         warnings.append("ODsay 대중교통 경로는 출발 시각 지정을 지원하지 않아 현재 시각 기준 경로를 사용합니다.")
+    tmap_notes = _tmap_pred_notes()
     if api_stats.get("tmap_live_fallback"):
-        warnings.append("TMAP 예측 경로를 쓰지 못해 일부 택시 구간은 현재 시각 기준으로 계산했습니다.")
+        extra = tmap_notes[0] if tmap_notes else ""
+        warnings.append(
+            f"택시 시간은 현재 교통 기준 ({extra})" if extra else "택시 시간은 현재 교통 기준"
+        )
+    if api_stats.get("tmap_pred_ok"):
+        tmap_prediction = "success"
+    elif api_stats.get("tmap_live_fallback"):
+        tmap_prediction = "fallback"
+    else:
+        tmap_prediction = "live_now"
 
     fastest = None
     cheapest = None
@@ -1522,4 +1554,9 @@ def analyze_routes(
         "anchors": {"fastest": fastest, "cheapest": cheapest},
         "warnings": warnings,
         "cache_stats": snapshot_stats(),
+        "applied_depart_time": format_seoul_iso(P["dep_dt"]),
+        "congestion_sheet": _sheet_for(P["dep_dt"]),
+        "congestion_clock": P["dep_dt"].strftime("%H:%M"),
+        "tmap_prediction": tmap_prediction,
+        "tmap_prediction_error": tmap_notes[0] if tmap_notes else None,
     }

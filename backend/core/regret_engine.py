@@ -3,10 +3,10 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
-
 import numpy as np
 import pandas as pd
+
+from .timeutil import arrive_budget_minutes, format_seoul_iso, parse_iso_to_seoul
 
 RHO = 0.001
 EPS = 1e-9
@@ -342,31 +342,28 @@ def _candidates_to_df(candidates):
 
 
 def _parse_arrive_by(value):
-    if not value:
-        return None
-    text = str(value).strip().replace("Z", "+00:00")
-    parsed = datetime.fromisoformat(text)
-    if parsed.tzinfo is not None:
-        parsed = parsed.astimezone().replace(tzinfo=None)
-    return parsed
+    return parse_iso_to_seoul(value)
 
 
 def _limits_from_request(limits, df):
     limits = dict(limits or {})
     lim = {}
     applied_src = {}
+    depart_out = None
+
+    depart_raw = limits.get("depart_time") or limits.get("departTime")
+    dep = parse_iso_to_seoul(depart_raw) if depart_raw else None
+    if dep is not None:
+        depart_out = format_seoul_iso(dep)
 
     arrive_by = limits.get("arrive_by")
     if arrive_by:
         t = _parse_arrive_by(arrive_by)
-        if "예상도착시각" in df.columns:
-            dep = (df["예상도착시각"]
-                   - pd.to_timedelta(df["실소요시간"], unit="m")).min()
-        else:
-            dep = datetime.now().replace(second=0, microsecond=0)
-        if t < dep:
-            t += timedelta(days=1)
-        lim["시간"] = (t - dep).total_seconds() / 60.0
+        if t is None:
+            raise ValueError("도착 희망 시각 형식을 확인할 수 없습니다.")
+        if dep is None:
+            raise ValueError("도착 희망 시각을 쓰려면 출발 시각(depart_time)이 필요합니다.")
+        lim["시간"] = arrive_budget_minutes(dep, t)
         applied_src["시간"] = "arrive_by"
     elif limits.get("max_time_min") is not None:
         lim["시간"] = float(limits["max_time_min"])
@@ -378,7 +375,7 @@ def _limits_from_request(limits, df):
     if limits.get("max_transfers") is not None:
         lim["환승"] = float(limits["max_transfers"])
         applied_src["환승"] = "max_transfers"
-    return lim, applied_src, arrive_by
+    return lim, applied_src, arrive_by, depart_out
 
 
 def _drop_nonbinding(lim, anc):
@@ -520,8 +517,10 @@ def _robust_flag(o, dev, lim, betas, use_knee=True):
     return len(set(tops)) == 1
 
 
-def _applied_limits(lim, applied_src, arrive_by, transfer_cap=None):
+def _applied_limits(lim, applied_src, arrive_by, transfer_cap=None, depart_time=None):
     out = {}
+    if depart_time:
+        out["depart_time"] = depart_time
     if "시간" in lim:
         out["max_time_min"] = _py(lim["시간"])
         if applied_src.get("시간") == "arrive_by" and arrive_by:
@@ -559,8 +558,9 @@ def rank_routes(
         return {"ranking": [], "robust": True, "applied_limits": {}, "applied_weights": {}}
 
     df = _candidates_to_df(candidates)
-    lim, applied_src, arrive_by = _limits_from_request(limits, df)
+    lim, applied_src, arrive_by, depart_out = _limits_from_request(limits, df)
     transfer_cap = lim.pop("환승", None)
+    lim_applied = dict(lim)
     if transfer_cap is not None:
         df = df[pd.to_numeric(df["환승계"], errors="coerce").fillna(0) <= transfer_cap + EPS].copy()
         df = df.reset_index(drop=True)
@@ -568,7 +568,7 @@ def rank_routes(
         return {
             "ranking": [],
             "robust": True,
-            "applied_limits": _applied_limits({}, applied_src, arrive_by, transfer_cap),
+            "applied_limits": _applied_limits(lim_applied, applied_src, arrive_by, transfer_cap, depart_out),
             "applied_weights": {},
         }
 
@@ -578,7 +578,7 @@ def rank_routes(
         return {
             "ranking": [],
             "robust": True,
-            "applied_limits": _applied_limits({}, applied_src, arrive_by, transfer_cap),
+            "applied_limits": _applied_limits(lim_applied, applied_src, arrive_by, transfer_cap, depart_out),
             "applied_weights": {},
         }
 
@@ -616,6 +616,6 @@ def rank_routes(
     return {
         "ranking": ranking,
         "robust": bool(robust),
-        "applied_limits": _applied_limits(lim, applied_src, arrive_by, transfer_cap),
+        "applied_limits": _applied_limits(lim_applied, applied_src, arrive_by, transfer_cap, depart_out),
         "applied_weights": {k: _py(float(v)) for k, v in w.items()},
     }

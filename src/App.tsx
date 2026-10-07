@@ -226,24 +226,38 @@ function formatProfileDate(iso?: string | null) {
 }
 
 function formatDepartLabel(iso: string | null) {
-  const d = iso ? new Date(iso) : new Date()
-  const wk = ['일', '월', '화', '수', '목', '금', '토'][d.getDay()]
-  return `${d.getFullYear()}. ${d.getMonth() + 1}. ${d.getDate()}.(${wk}) ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')} 출발`
+  const p = seoulParts(iso)
+  const utc = Date.UTC(p.year, p.month - 1, p.day)
+  const wk = ['일', '월', '화', '수', '목', '금', '토'][new Date(utc).getUTCDay()]
+  return `${p.year}. ${p.month}. ${p.day}.(${wk}) ${String(p.hour).padStart(2, '0')}:${String(p.minute).padStart(2, '0')} 출발`
 }
 
 function arrivalLabel(iso: string | null, minutes: number) {
-  const d = iso ? new Date(iso) : new Date()
-  const at = new Date(d.getTime() + minutes * 60_000)
-  const h = at.getHours()
-  const m = String(at.getMinutes()).padStart(2, '0')
-  const ap = h < 12 ? '오전' : '오후'
-  const h12 = h % 12 || 12
-  return `${ap} ${h12}:${m}`
+  const at = seoulParts(shiftIso(iso, minutes))
+  const ap = at.hour < 12 ? '오전' : '오후'
+  const h12 = at.hour % 12 || 12
+  return `${ap} ${h12}:${String(at.minute).padStart(2, '0')}`
 }
 
 function clockLabel(iso: string | null) {
+  const p = seoulParts(iso)
+  return `${String(p.hour).padStart(2, '0')}:${String(p.minute).padStart(2, '0')}`
+}
+
+function shiftIso(iso: string | null, minutes: number) {
   const d = iso ? new Date(iso) : new Date()
-  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+  return new Date(d.getTime() + minutes * 60_000).toISOString()
+}
+
+function addSeoulDays(year: number, month: number, day: number, days: number) {
+  const next = new Date(Date.UTC(year, month - 1, day + days))
+  return { year: next.getUTCFullYear(), month: next.getUTCMonth() + 1, day: next.getUTCDate() }
+}
+
+function isArriveNextDay(departIso: string | null, hhmm: string) {
+  const dep = seoulParts(departIso)
+  const [hour, minute] = hhmm.split(':').map(Number)
+  return hour * 60 + minute < dep.hour * 60 + dep.minute
 }
 
 function seoulIso(date: Date) {
@@ -255,10 +269,11 @@ function seoulIso(date: Date) {
     hour: '2-digit',
     minute: '2-digit',
     second: '2-digit',
-    hour12: false,
+    hourCycle: 'h23',
   }).formatToParts(date)
   const pick = (type: string) => parts.find(part => part.type === type)?.value || '00'
-  return `${pick('year')}-${pick('month')}-${pick('day')}T${pick('hour')}:${pick('minute')}:${pick('second')}+09:00`
+  const hour = String(Number(pick('hour')) % 24).padStart(2, '0')
+  return `${pick('year')}-${pick('month')}-${pick('day')}T${hour}:${pick('minute')}:${pick('second')}+09:00`
 }
 
 function seoulParts(iso: string | null) {
@@ -271,14 +286,14 @@ function seoulParts(iso: string | null) {
     weekday: 'short',
     hour: '2-digit',
     minute: '2-digit',
-    hour12: false,
+    hourCycle: 'h23',
   }).formatToParts(d)
   const pick = (type: string) => parts.find(part => part.type === type)?.value || ''
   return {
     year: Number(pick('year')),
     month: Number(pick('month')),
     day: Number(pick('day')),
-    hour: Number(pick('hour')),
+    hour: Number(pick('hour')) % 24,
     minute: Number(pick('minute')),
     weekday: pick('weekday'),
   }
@@ -313,25 +328,42 @@ function sourceBadge(source: ParamSource) {
 const fmt = (n: number) => n.toLocaleString('ko-KR')
 
 function clockAfter(iso: string | null, minutes: number) {
-  const d = iso ? new Date(iso) : new Date()
-  return clockLabel(new Date(d.getTime() + minutes * 60_000).toISOString())
+  return clockLabel(shiftIso(iso, minutes))
 }
 
 function arrivalToIso(departIso: string | null, hhmm: string) {
-  const base = departIso ? new Date(departIso) : new Date()
+  const dep = seoulParts(departIso)
   const [hour, minute] = hhmm.split(':').map(Number)
-  const at = new Date(base)
-  at.setHours(hour, minute, 0, 0)
-  if (at.getTime() < base.getTime()) at.setDate(at.getDate() + 1)
-  return at.toISOString()
+  let year = dep.year
+  let month = dep.month
+  let day = dep.day
+  if (hour * 60 + minute < dep.hour * 60 + dep.minute) {
+    const next = addSeoulDays(year, month, day, 1)
+    year = next.year
+    month = next.month
+    day = next.day
+  }
+  return buildSeoulIso(year, month, day, hour, minute)
 }
 
-function overHint(over?: RankOver | null) {
+function arriveBudgetMin(departIso: string | null, hhmm: string) {
+  const arriveIso = arrivalToIso(departIso, hhmm)
+  const dep = departIso ? new Date(departIso).getTime() : Date.now()
+  return Math.round((new Date(arriveIso).getTime() - dep) / 60_000)
+}
+
+function overHint(over?: RankOver | null, limits?: RankLimits | null) {
   if (!over) return ''
+  const extras: string[] = []
+  if (over.cost_krw && over.cost_krw > 0) extras.push(`요금 +${fmt(Math.round(over.cost_krw))}원`)
+  if (over.transfers && over.transfers > 0) extras.push(`환승 +${Math.round(over.transfers)}회`)
+  if (limits?.arrive_by && over.time_min && over.time_min > 0) {
+    const late = `희망 시각보다 ${Math.round(over.time_min)}분 늦어요`
+    return extras.length ? `${late} · ${extras.join(', ')}` : late
+  }
   const parts: string[] = []
   if (over.time_min && over.time_min > 0) parts.push(`시간 +${Math.round(over.time_min)}분`)
-  if (over.cost_krw && over.cost_krw > 0) parts.push(`요금 +${fmt(Math.round(over.cost_krw))}원`)
-  if (over.transfers && over.transfers > 0) parts.push(`환승 +${Math.round(over.transfers)}회`)
+  parts.push(...extras)
   return parts.length ? `희망 조건보다 ${parts.join(', ')}` : ''
 }
 
@@ -2365,7 +2397,9 @@ function ResultsScreen({ onNav }: { onNav: NavTo }) {
 
         <div className="flex items-center justify-between px-4 py-2 border-b border-[#F3F4F6]">
         <button type="button" onClick={() => onNav('home')} className="text-[12px] font-semibold text-[#374151]">
-          출발 {clockLabel(trip.departTime)} → 도착 예정 {rank1 ? clockAfter(trip.departTime, rank1.total_time) : '--:--'}
+          {trip.appliedLimits?.arrive_by
+            ? `출발 ${clockLabel(trip.departTime)} → 도착 희망 ${clockLabel(trip.appliedLimits.arrive_by)}`
+            : `출발 ${clockLabel(trip.departTime)} → 도착 예정 ${rank1 ? clockAfter(trip.departTime, rank1.total_time) : '--:--'}`}
         </button>
         <button
           type="button"
@@ -2375,6 +2409,12 @@ function ResultsScreen({ onNav }: { onNav: NavTo }) {
           {limitsSummary(trip.appliedLimits) || '조건 없음'}
         </button>
       </div>
+
+      {(data?.warnings || []).some(item => item.includes('택시 시간은 현재 교통 기준')) && (
+        <div className="px-4 py-1.5 text-[11px] text-[#9CA3AF] border-b border-[#F3F4F6]">
+          {(data?.warnings || []).find(item => item.includes('택시 시간은 현재 교통 기준'))}
+        </div>
+      )}
 
       {trip.ranking && (
         <div className="px-4 py-2 border-b border-[#F3F4F6]">
@@ -2438,7 +2478,7 @@ function ResultsScreen({ onNav }: { onNav: NavTo }) {
             if (d > 0) compareParts.push(`택시만보다 ${fmt(d)}원 저렴`)
           }
           const ranked = overById.get(r.id)
-          const gapText = ranked && !ranked.meets_all ? overHint(ranked.over) : ''
+          const gapText = ranked && !ranked.meets_all ? overHint(ranked.over, trip.appliedLimits) : ''
           const tags = [
             isFirst ? '추천' : '',
             ROUTE_TYPE_LABEL[r.type] || r.type,
@@ -2483,6 +2523,7 @@ function ResultsScreen({ onNav }: { onNav: NavTo }) {
                 }}>
                   {arrivalLabel(trip.departTime, 0)} - {arrivalLabel(trip.departTime, r.total_time)} · {fmt(Math.round(r.cost))}원 · 환승 {r.transfers}회
                   {r.transfer_station ? ` · ${r.transfer_station}` : ''}
+                  {' · '}도착 예정 {clockAfter(trip.departTime, r.total_time)}
                 </div>
 
                 <SegmentBar segments={segments} />
@@ -2685,9 +2726,9 @@ function ReservationScreen({ onNav }: { onNav: NavTo }) {
     `${String(Math.floor(value / 60)).padStart(2, '0')}:${String(value % 60).padStart(2, '0')}`
 
   const selectQuickTime = (minutes: number, label: string) => {
-    const base = trip.departTime ? new Date(trip.departTime) : new Date()
-    const total = base.getHours() * 60 + base.getMinutes() + minutes
-    setArrivalTime(minutesToTime(total % (24 * 60)))
+    const parts = seoulParts(trip.departTime)
+    const total = parts.hour * 60 + parts.minute + minutes
+    setArrivalTime(minutesToTime(((total % (24 * 60)) + 24 * 60) % (24 * 60)))
     setQuickTime(label)
   }
 
@@ -2732,6 +2773,7 @@ function ReservationScreen({ onNav }: { onNav: NavTo }) {
     if (enabled.cost) limits.max_cost_krw = maxCost
     if (enabled.transfer) limits.max_transfers = transferLimit
     if (enabled.time) limits.arrive_by = arrivalToIso(trip.departTime, arrivalTime)
+    if (trip.departTime) limits.depart_time = trip.departTime
     if (!hasLimits(limits)) return null
     limits.importance = importanceForLimits(limits, importance)
     return limits
@@ -2777,7 +2819,9 @@ function ReservationScreen({ onNav }: { onNav: NavTo }) {
           <div className="flex items-center gap-2">
             <span className="flex-1 text-[15px] font-semibold text-[#182230]">도착 시간</span>
             <span className={`text-[13px] font-semibold ${enabled.time ? 'text-[#2F7BF6]' : 'text-[#8A94A6]'}`}>
-              {enabled.time ? `${arrivalTime}까지` : '상관없음'}
+              {enabled.time
+                ? `${isArriveNextDay(trip.departTime, arrivalTime) ? '다음 날 ' : ''}${arrivalTime}까지 (${arriveBudgetMin(trip.departTime, arrivalTime)}분 이내)`
+                : '상관없음'}
             </span>
             {renderToggle('time')}
           </div>
@@ -2810,7 +2854,9 @@ function ReservationScreen({ onNav }: { onNav: NavTo }) {
                     ariaLabel="분"
                   />
                 </div>
-                <div className="mt-1 text-[12px] font-semibold text-[#2F7BF6]">{formatTime(arrivalTime)} 도착</div>
+                <div className="mt-1 text-[12px] font-semibold text-[#2F7BF6]">
+                  {isArriveNextDay(trip.departTime, arrivalTime) ? '다음 날 ' : ''}{formatTime(arrivalTime)} 도착
+                </div>
                 {arriveHint && <div className="mt-2 text-[12px] text-[#9CA3AF]">{arriveHint}</div>}
               </div>
               <div className="mt-3 grid grid-cols-3 gap-2">
@@ -3211,14 +3257,46 @@ export default function App() {
     persistUserStore(manualVot, profile, routeParams, manualParams, rankingBetas, next)
   }
 
+  const discardAnalysis = () => {
+    requestId.current += 1
+    setAnalysis(null)
+    analysisRef.current = null
+    analyzePromiseRef.current = null
+    setAnalyzeError(null)
+    setSelectedRoute(null)
+    setRanking(null)
+    setRankError(null)
+    setAppliedLimits(null)
+    setRankedBetas(null)
+    setRankedImportance(null)
+  }
+
   const setDepartNow = () => {
     setDepartMode('now')
     setScheduledDepartState(null)
+    const hadSearch = Boolean(origin && destination && (analysisRef.current || analyzePromiseRef.current || departTime))
+    if (hadSearch && origin && destination) {
+      const when = seoulIso(new Date())
+      setDepartTime(when)
+      setSelectedRoute(null)
+      runAnalyze(origin, destination, when)
+      return
+    }
+    discardAnalysis()
+    setDepartTime(null)
   }
 
   const setScheduledDepart = (iso: string) => {
     setDepartMode('scheduled')
     setScheduledDepartState(iso)
+    const hadSearch = Boolean(origin && destination && (analysisRef.current || analyzePromiseRef.current || departTime))
+    if (hadSearch && origin && destination) {
+      setDepartTime(iso)
+      setSelectedRoute(null)
+      runAnalyze(origin, destination, iso)
+      return
+    }
+    discardAnalysis()
   }
 
   const setAnswer = (cardIndex: number, altIndex: number) => {
@@ -3354,7 +3432,7 @@ export default function App() {
 
   const retryAnalyze = () => {
     if (!origin || !destination) return
-    const when = departTime ?? new Date().toISOString()
+    const when = departTime ?? seoulIso(new Date())
     setDepartTime(when)
     runAnalyze(origin, destination, when)
   }
@@ -3380,6 +3458,7 @@ export default function App() {
       })
       const withImportance = {
         ...limits,
+        depart_time: limits.depart_time || departTime,
         importance: importanceForLimits(limits, prefs),
       }
       const result = await rankRoutes(source, withImportance, { gc: rankingBetas.gc, knee: rankingBetas.knee })

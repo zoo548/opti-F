@@ -37,6 +37,11 @@ export type AnalyzeResponse = {
     cheapest: string | null
   }
   warnings: string[]
+  applied_depart_time?: string
+  congestion_sheet?: string
+  congestion_clock?: string
+  tmap_prediction?: string
+  tmap_prediction_error?: string | null
 }
 
 export type RankImportanceLevel = 'high' | 'mid' | 'low'
@@ -51,6 +56,7 @@ export type RankLimits = {
   max_cost_krw?: number | null
   max_transfers?: number | null
   arrive_by?: string | null
+  depart_time?: string | null
   importance?: RankImportance
 }
 
@@ -303,6 +309,7 @@ export function rankRoutes(
   const body: Record<string, unknown> = { candidates, limits }
   if (betas) body.betas = betas
   if (limits.importance) body.importance = limits.importance
+  if (limits.depart_time) body.depart_time = limits.depart_time
   return apiPost<RankResponse>('/routes/rank', body)
 }
 
