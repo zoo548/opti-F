@@ -21,7 +21,8 @@ import {
   type SurveyResponse,
 } from '@/lib/api'
 import { getEffectiveParams, MANUAL_COEFFS, parseManualCoeff, parseManualVot, sanitizeManualParams, VOT_MAX, VOT_MIN, type ManualCoeffKey, type ManualParams, type ParamSource } from '@/lib/params'
-import { BETA_MAX, betasEqual, DEFAULT_BETAS, importanceFromPrefs, parseManualBetas, ratioPreviewLine, TIME_COST_CHIPS, type RankingBetas } from '@/lib/ranking'
+import { BETA_MAX, betasEqual, DEFAULT_BETAS, DEFAULT_IMPORTANCE, hydrateRankingPreset, importanceEqual, importanceForLimits, IMPORTANCE_OPTIONS, parseConditionImportance, parseManualBetas, previewLine, previewWeights, type RankImportance, type RankImportanceLevel, type RankingBetas } from '@/lib/ranking'
+import { KIM_PRESET } from '@/lib/presets'
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 type Screen =
@@ -38,6 +39,7 @@ type ReservationDraft = {
   maxCost: number
   transferLimit: number
   enabled: { time: boolean; cost: boolean; transfer: boolean; duration: boolean }
+  importance: RankImportance
 }
 
 type TripContextValue = {
@@ -68,8 +70,11 @@ type TripContextValue = {
   applyRank: (limits: RankLimits, candidates?: RouteCandidate[]) => Promise<void>
   clearRanking: () => void
   rankedBetas: RankingBetas | null
+  rankedImportance: RankImportance | null
   reservationDraft: ReservationDraft | null
   setReservationDraft: (draft: ReservationDraft | null) => void
+  conditionImportance: RankImportance
+  setConditionImportance: (value: RankImportance) => void
 }
 
 const TripContext = createContext<TripContextValue | null>(null)
@@ -86,6 +91,7 @@ const USE_PERSONAL_KEY = 'opti.sp.use_personal'
 const MANUAL_VOT_KEY = 'opti.sp.manual_vot'
 const MANUAL_PARAMS_KEY = 'opti.sp.manual_params'
 const MANUAL_BETAS_KEY = 'opti.sp.manual_betas'
+const CONDITION_IMPORTANCE_KEY = 'opti.sp.condition_importance'
 const USER_STORE_KEY = 'opti.user.prefs'
 
 type SpContextValue = {
@@ -149,14 +155,28 @@ function persistUserStore(
   routeParams: RouteParams | null,
   manualParams: ManualParams,
   rankingBetas: RankingBetas,
+  conditionImportance: RankImportance,
 ) {
   writeStorage(USER_STORE_KEY, {
     manual_vot: manualVot,
     manual_params: manualParams,
-    manual_betas: rankingBetas,
+    manual_betas: { gc: rankingBetas.gc, knee: rankingBetas.knee },
+    condition_importance: conditionImportance,
     sp_profile: profile,
     route_params: routeParams,
   })
+}
+
+function loadConditionImportance(): RankImportance {
+  const dedicated = readStorage(CONDITION_IMPORTANCE_KEY)
+  if (dedicated) return parseConditionImportance(dedicated)
+  const store = readStorage<Record<string, unknown>>(USER_STORE_KEY)
+  if (store?.condition_importance) return parseConditionImportance(store.condition_importance)
+  const presetRaw = store?.ranking_preset ?? store?.preset
+  if (presetRaw === 'KIM') return { ...KIM_PRESET.importance }
+  const hydrated = hydrateRankingPreset(presetRaw)
+  if (hydrated) return hydrated.importance
+  return { ...DEFAULT_IMPORTANCE }
 }
 
 function altToSegments(alt: SpAlternative): Segment[] {
@@ -1711,18 +1731,51 @@ function SPCompleteScreen({ onNav }: { onNav: (s: Screen) => void }) {
   )
 }
 
-function AppliedWeightsHint({ onChange }: { onChange: () => void }) {
+function ImportanceSegment({
+  value,
+  onChange,
+  ariaLabel,
+}: {
+  value: RankImportanceLevel
+  onChange: (value: RankImportanceLevel) => void
+  ariaLabel: string
+}) {
+  return (
+    <div className="grid shrink-0 grid-cols-3 gap-1 rounded-[10px] bg-[#F1F3F6] p-1" role="group" aria-label={ariaLabel}>
+      {IMPORTANCE_OPTIONS.map(option => (
+        <button
+          type="button"
+          key={option.value}
+          onClick={() => onChange(option.value)}
+          className={`h-8 min-w-8 rounded-lg px-2 text-[13px] font-semibold ${
+            value === option.value ? 'bg-[#2F7BF6] text-white shadow-sm' : 'text-[#8A94A6]'
+          }`}
+        >
+          {option.label}
+        </button>
+      ))}
+    </div>
+  )
+}
+
+function AppliedWeightsHint({
+  axes,
+  importance,
+  onChange,
+}: {
+  axes: { time?: boolean; cost?: boolean }
+  importance: RankImportance
+  onChange?: () => void
+}) {
   const sp = useSp()
   return (
     <div className="text-[11px] leading-relaxed text-[#9CA3AF]">
-      {ratioPreviewLine(sp.rankingBetas)}
-      <button
-        type="button"
-        className="ml-1.5 font-semibold text-[#2F7BF6]"
-        onClick={onChange}
-      >
-        변경
-      </button>
+      {previewLine(previewWeights(sp.rankingBetas, importance, axes))}
+      {onChange && (
+        <button type="button" className="ml-1.5 font-semibold text-[#2F7BF6]" onClick={onChange}>
+          변경
+        </button>
+      )}
     </div>
   )
 }
@@ -1731,22 +1784,16 @@ function RankingWeightSection() {
   const sp = useSp()
   const betas = sp.rankingBetas
   const rawRest = 1 - betas.gc - betas.knee
-  const timePct = Math.round(clampDisplayShare(betas.timeShare) * 100)
-  const costPct = 100 - timePct
   const setPct = (key: 'gc' | 'knee', pct: number) => {
     const next = Math.max(0, Math.min(BETA_MAX * 100, Math.round(pct))) / 100
     sp.setRankingBetas({ ...betas, [key]: next })
-  }
-  const setTimeShare = (share: number) => {
-    const next = Math.max(0, Math.min(100, Math.round(share * 100))) / 100
-    sp.setRankingBetas({ ...betas, timeShare: next })
   }
 
   return (
     <div className="rounded-xl bg-[#F9FAFB] px-3 py-3 space-y-3">
       <div>
         <div className="text-[13px] font-semibold text-[#111827]">추천 기준 비중</div>
-        <div className="mt-0.5 text-[11px] text-[#9CA3AF]">가성비·균형점과 시간 대 비용 비율을 여기서 조절해요.</div>
+        <div className="mt-0.5 text-[11px] text-[#9CA3AF]">가성비와 균형점 비중을 조절하면, 나머지는 시간·비용 중요도로 나뉘어요.</div>
       </div>
       <div>
         <div className="flex items-center justify-between mb-1">
@@ -1783,43 +1830,6 @@ function RankingWeightSection() {
       {rawRest < 0.1 - 1e-9 && (
         <div className="text-[11px] text-[#B45309]">가성비와 균형점 합이 90%를 넘어, 내 조건 몫을 10%로 맞춰 적용해요.</div>
       )}
-      <div>
-        <div className="flex items-center justify-between mb-2">
-          <span className="text-[13px] font-semibold text-[#111827]">시간 vs 비용</span>
-          <span className="text-[12px] font-bold text-[#374151]">{timePct}:{costPct}</span>
-        </div>
-        <div className="grid grid-cols-3 gap-1.5 mb-3">
-          {TIME_COST_CHIPS.map(chip => (
-            <button
-              type="button"
-              key={chip.label}
-              onClick={() => setTimeShare(chip.timeShare)}
-              className={`h-9 rounded-lg px-1 text-[11px] font-semibold leading-tight ${
-                Math.abs(clampDisplayShare(betas.timeShare) - chip.timeShare) < 0.005
-                  ? 'bg-[#2F7BF6] text-white'
-                  : 'bg-white text-[#687386] border border-[#E5E7EB]'
-              }`}
-            >
-              {chip.label}
-            </button>
-          ))}
-        </div>
-        <div className="flex items-center justify-between text-[11px] text-[#9CA3AF] mb-1">
-          <span>빨리 도착</span>
-          <span>저렴하게</span>
-        </div>
-        <input
-          type="range"
-          min={0}
-          max={100}
-          step={1}
-          value={costPct}
-          aria-label="시간 대 비용 비율"
-          onChange={event => setTimeShare((100 - Number(event.target.value)) / 100)}
-          className="w-full"
-        />
-      </div>
-      <div className="text-[12px] font-medium text-[#111827]">{ratioPreviewLine(betas)}</div>
       <button
         type="button"
         onClick={() => sp.resetRankingBetas()}
@@ -1829,11 +1839,6 @@ function RankingWeightSection() {
       </button>
     </div>
   )
-}
-
-function clampDisplayShare(value: number) {
-  if (!Number.isFinite(value)) return 0.5
-  return Math.min(1, Math.max(0, value))
 }
 
 function SPProfileScreen({ onNav, startAdvanced = false, backTo = 'home' }: { onNav: NavTo; startAdvanced?: boolean; backTo?: Screen }) {
@@ -2370,11 +2375,20 @@ function ResultsScreen({ onNav }: { onNav: NavTo }) {
 
       {trip.ranking && (
         <div className="px-4 py-2 border-b border-[#F3F4F6]">
-          <AppliedWeightsHint onChange={() => onNav('sp-profile', { advanced: true, back: 'results' })} />
+          <AppliedWeightsHint
+            axes={{
+              time: trip.appliedLimits?.arrive_by != null || trip.appliedLimits?.max_time_min != null,
+              cost: trip.appliedLimits?.max_cost_krw != null,
+            }}
+            importance={trip.conditionImportance}
+            onChange={() => onNav('sp-profile', { advanced: true, back: 'results' })}
+          />
         </div>
       )}
 
-      {trip.ranking && trip.appliedLimits && !betasEqual(sp.rankingBetas, trip.rankedBetas) && (
+      {trip.ranking && trip.appliedLimits && (
+        !betasEqual(sp.rankingBetas, trip.rankedBetas) || !importanceEqual(trip.conditionImportance, trip.rankedImportance)
+      ) && (
         <div className="px-4 py-2.5 border-b border-[#F3F4F6] bg-[#FFF7ED]">
           <button
             type="button"
@@ -2655,6 +2669,9 @@ function ReservationScreen({ onNav }: { onNav: NavTo }) {
     transfer: seed?.max_transfers != null,
     duration: seed?.max_time_min != null,
   }))
+  const [importance, setImportance] = useState<RankImportance>(() => (
+    parseConditionImportance(draft?.importance || seed?.importance || trip.conditionImportance)
+  ))
 
   const formatTime = (value: string) => {
     const [hour, minute] = value.split(':').map(Number)
@@ -2713,11 +2730,12 @@ function ReservationScreen({ onNav }: { onNav: NavTo }) {
     if (enabled.transfer) limits.max_transfers = transferLimit
     if (enabled.time) limits.arrive_by = arrivalToIso(trip.departTime, arrivalTime)
     if (!hasLimits(limits)) return null
-    limits.importance = importanceFromPrefs(limits, sp.rankingBetas)
+    limits.importance = importanceForLimits(limits, importance)
     return limits
   }
 
   const saveDraft = () => {
+    trip.setConditionImportance(importance)
     trip.setReservationDraft({
       arrivalTime,
       quickTime,
@@ -2726,6 +2744,7 @@ function ReservationScreen({ onNav }: { onNav: NavTo }) {
       maxCost,
       transferLimit,
       enabled,
+      importance,
     })
   }
 
@@ -2757,6 +2776,13 @@ function ReservationScreen({ onNav }: { onNav: NavTo }) {
             <span className={`text-[13px] font-semibold ${enabled.time ? 'text-[#2F7BF6]' : 'text-[#8A94A6]'}`}>
               {enabled.time ? `${arrivalTime}까지` : '상관없음'}
             </span>
+            {enabled.time && (
+              <ImportanceSegment
+                value={importance.time || 'mid'}
+                onChange={level => setImportance(current => ({ ...current, time: level }))}
+                ariaLabel="시간 중요도"
+              />
+            )}
             {renderToggle('time')}
           </div>
           {enabled.time && (
@@ -2821,6 +2847,13 @@ function ReservationScreen({ onNav }: { onNav: NavTo }) {
             <span className={`text-[13px] font-semibold ${enabled.duration ? 'text-[#2F7BF6]' : 'text-[#8A94A6]'}`}>
               {enabled.duration && maxTime ? `${maxTime}분 이내` : '상관없음'}
             </span>
+            {enabled.duration && (
+              <ImportanceSegment
+                value={importance.time || 'mid'}
+                onChange={level => setImportance(current => ({ ...current, time: level }))}
+                ariaLabel="시간 중요도"
+              />
+            )}
             {renderToggle('duration')}
           </div>
           {enabled.duration && (
@@ -2844,6 +2877,13 @@ function ReservationScreen({ onNav }: { onNav: NavTo }) {
             <span className={`text-[13px] font-semibold ${enabled.cost ? 'text-[#2F7BF6]' : 'text-[#8A94A6]'}`}>
               {enabled.cost ? `${fmt(minCost)}원 ~ ${fmt(maxCost)}원` : '상관없음'}
             </span>
+            {enabled.cost && (
+              <ImportanceSegment
+                value={importance.cost || 'mid'}
+                onChange={level => setImportance(current => ({ ...current, cost: level }))}
+                ariaLabel="비용 중요도"
+              />
+            )}
             {renderToggle('cost')}
           </div>
           {enabled.cost && (
@@ -2887,6 +2927,9 @@ function ReservationScreen({ onNav }: { onNav: NavTo }) {
         <div className="rounded-2xl bg-white p-4 shadow-[0_2px_14px_rgba(15,23,42,0.05)]">
           <div className="flex items-center gap-2">
             <span className="flex-1 text-[15px] font-semibold text-[#182230]">환승 횟수</span>
+            {enabled.transfer && (
+              <span className="rounded-full bg-[#EEF2FF] px-2.5 py-1 text-[11px] font-semibold text-[#4338CA]">필수</span>
+            )}
             <span className={`text-[13px] font-semibold ${enabled.transfer ? 'text-[#2F7BF6]' : 'text-[#8A94A6]'}`}>
               {enabled.transfer ? `${transferLimit}회 이하` : '상관없음'}
             </span>
@@ -2920,7 +2963,11 @@ function ReservationScreen({ onNav }: { onNav: NavTo }) {
           )}
         </div>
         <div className="px-1 pt-1">
-          <AppliedWeightsHint onChange={openWeightSettings} />
+          <AppliedWeightsHint
+            axes={{ time: enabled.time || enabled.duration, cost: enabled.cost }}
+            importance={importance}
+            onChange={openWeightSettings}
+          />
         </div>
       </div>
 
@@ -3096,10 +3143,16 @@ export default function App() {
   const [rankingBetas, setRankingBetasState] = useState<RankingBetas>(() => {
     const dedicated = parseManualBetas(readStorage(MANUAL_BETAS_KEY))
     if (dedicated) return dedicated
-    const store = readStorage<{ manual_betas?: unknown }>(USER_STORE_KEY)
-    return parseManualBetas(store?.manual_betas) ?? { ...DEFAULT_BETAS }
+    const store = readStorage<Record<string, unknown>>(USER_STORE_KEY)
+    const fromStore = parseManualBetas(store?.manual_betas)
+    if (fromStore) return fromStore
+    const presetRaw = store?.ranking_preset ?? store?.preset
+    if (presetRaw === 'KIM') return { gc: KIM_PRESET.gc, knee: KIM_PRESET.knee }
+    return hydrateRankingPreset(presetRaw)?.betas ?? { ...DEFAULT_BETAS }
   })
+  const [conditionImportance, setConditionImportanceState] = useState<RankImportance>(loadConditionImportance)
   const [rankedBetas, setRankedBetas] = useState<RankingBetas | null>(null)
+  const [rankedImportance, setRankedImportance] = useState<RankImportance | null>(null)
   const [reservationDraft, setReservationDraft] = useState<ReservationDraft | null>(null)
   const [profileBack, setProfileBack] = useState<Screen>('home')
   const [startAdvanced, setStartAdvanced] = useState(false)
@@ -3117,12 +3170,12 @@ export default function App() {
   const setManualVot = (value: number | null) => {
     setManualVotState(value)
     writeStorage(MANUAL_VOT_KEY, value)
-    persistUserStore(value, profile, routeParams, manualParams, rankingBetas)
+    persistUserStore(value, profile, routeParams, manualParams, rankingBetas, conditionImportance)
   }
 
   const persistManualParams = (next: ManualParams) => {
     writeStorage(MANUAL_PARAMS_KEY, next)
-    persistUserStore(manualVot, profile, routeParams, next, rankingBetas)
+    persistUserStore(manualVot, profile, routeParams, next, rankingBetas, conditionImportance)
   }
 
   const setManualCoeff = (key: ManualCoeffKey, value: number | null) => {
@@ -3144,7 +3197,7 @@ export default function App() {
 
   const persistRankingBetas = (next: RankingBetas) => {
     writeStorage(MANUAL_BETAS_KEY, next)
-    persistUserStore(manualVot, profile, routeParams, manualParams, next)
+    persistUserStore(manualVot, profile, routeParams, manualParams, next, conditionImportance)
   }
 
   const setRankingBetas = (value: RankingBetas) => {
@@ -3155,6 +3208,13 @@ export default function App() {
 
   const resetRankingBetas = () => {
     setRankingBetas({ ...DEFAULT_BETAS })
+  }
+
+  const setConditionImportance = (value: RankImportance) => {
+    const next = parseConditionImportance(value)
+    setConditionImportanceState(next)
+    writeStorage(CONDITION_IMPORTANCE_KEY, next)
+    persistUserStore(manualVot, profile, routeParams, manualParams, rankingBetas, next)
   }
 
   const setDepartNow = () => {
@@ -3226,7 +3286,7 @@ export default function App() {
       setRouteParams(result.route_params)
       writeStorage(PROFILE_KEY, savedProfile)
       writeStorage(PARAMS_KEY, result.route_params)
-      persistUserStore(manualVot, savedProfile, result.route_params, manualParams, rankingBetas)
+      persistUserStore(manualVot, savedProfile, result.route_params, manualParams, rankingBetas, conditionImportance)
     } catch (error) {
       if (id !== estimateId.current) return
       setEstimateError(error instanceof Error ? error.message : '추정에 실패했습니다.')
@@ -3254,6 +3314,7 @@ export default function App() {
     setRankError(null)
     setAppliedLimits(null)
     setRankedBetas(null)
+    setRankedImportance(null)
     const effective = getEffectiveParams({
       manualVot,
       manualParams,
@@ -3319,14 +3380,19 @@ export default function App() {
     setRankingBusy(true)
     setRankError(null)
     try {
+      const prefs = parseConditionImportance({
+        time: limits.importance?.time ?? conditionImportance.time,
+        cost: limits.importance?.cost ?? conditionImportance.cost,
+      })
       const withImportance = {
         ...limits,
-        importance: importanceFromPrefs(limits, rankingBetas),
+        importance: importanceForLimits(limits, prefs),
       }
       const result = await rankRoutes(source, withImportance, { gc: rankingBetas.gc, knee: rankingBetas.knee })
       setRanking(result)
       setAppliedLimits(withImportance)
       setRankedBetas({ ...rankingBetas })
+      setRankedImportance({ ...prefs })
     } catch (error) {
       const message = error instanceof Error ? error.message : '조건 적용에 실패했습니다.'
       setRankError(message)
@@ -3341,6 +3407,7 @@ export default function App() {
     setRankError(null)
     setAppliedLimits(null)
     setRankedBetas(null)
+    setRankedImportance(null)
   }
 
   const trip: TripContextValue = {
@@ -3371,8 +3438,11 @@ export default function App() {
     applyRank,
     clearRanking,
     rankedBetas,
+    rankedImportance,
     reservationDraft,
     setReservationDraft,
+    conditionImportance,
+    setConditionImportance,
   }
 
   const sp: SpContextValue = {

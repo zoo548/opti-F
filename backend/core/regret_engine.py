@@ -396,9 +396,11 @@ def _drop_nonbinding(lim, anc):
 
 
 _IMP_LEVEL = {
-    "하": 1.0, "중": 3.0, "상": 5.0,
-    "low": 1.0, "medium": 3.0, "high": 5.0,
+    "하": 2.0, "중": 3.0, "상": 4.0,
+    "low": 2.0, "mid": 3.0, "medium": 3.0, "high": 4.0,
 }
+
+_SCORE_AXES = ("시간", "비용")
 
 _IMP_ALIASES = {
     "시간": "시간", "time": "시간", "duration": "시간", "max_time_min": "시간",
@@ -410,7 +412,8 @@ _IMP_ALIASES = {
 def _allocate_weights(bg, bk, lim, use_knee, imp=None):
     if not use_knee:
         bk = 0.0
-    if not lim:
+    score_lim = [k for k in lim if k in _SCORE_AXES]
+    if not score_lim:
         tot = bg + bk
         if tot < EPS:
             bg, bk = (1.0, 0.0) if not use_knee else (0.5, 0.5)
@@ -426,9 +429,9 @@ def _allocate_weights(bg, bk, lim, use_knee, imp=None):
 
     rest = 1.0 - bg - bk
     if imp is None:
-        imp = {k: 3.0 for k in lim}
+        imp = {k: 3.0 for k in score_lim}
     else:
-        imp = {k: float(imp.get(k, 3.0)) for k in lim}
+        imp = {k: float(imp.get(k, 3.0)) for k in score_lim}
         for k in list(imp):
             if imp[k] <= 0:
                 imp[k] = 3.0
@@ -449,19 +452,23 @@ def _default_weights(lim, use_knee):
 
 
 def _parse_importance(importance, lim):
-    if not importance or not lim:
-        return {k: 3.0 for k in lim}
+    score_lim = [k for k in lim if k in _SCORE_AXES]
+    if not score_lim:
+        return {}
+    if not importance:
+        return {k: 3.0 for k in score_lim}
     mapped = {}
     if isinstance(importance, dict):
         for key, val in importance.items():
             name = _IMP_ALIASES.get(str(key))
-            if not name:
+            if name not in _SCORE_AXES:
                 continue
             if isinstance(val, str):
-                mapped[name] = _IMP_LEVEL.get(val.strip(), 3.0)
+                token = val.strip()
+                mapped[name] = _IMP_LEVEL.get(token, _IMP_LEVEL.get(token.lower(), 3.0))
             else:
                 mapped[name] = float(val)
-    return {k: mapped.get(k, 3.0) for k in lim}
+    return {k: mapped.get(k, 3.0) for k in score_lim}
 
 
 def _weights_from_betas(betas, importance, lim, use_knee):
@@ -513,7 +520,7 @@ def _robust_flag(o, dev, lim, betas, use_knee=True):
     return len(set(tops)) == 1
 
 
-def _applied_limits(lim, applied_src, arrive_by):
+def _applied_limits(lim, applied_src, arrive_by, transfer_cap=None):
     out = {}
     if "시간" in lim:
         out["max_time_min"] = _py(lim["시간"])
@@ -521,7 +528,9 @@ def _applied_limits(lim, applied_src, arrive_by):
             out["arrive_by"] = arrive_by
     if "비용" in lim:
         out["max_cost_krw"] = _py(lim["비용"])
-    if "환승" in lim:
+    if transfer_cap is not None:
+        out["max_transfers"] = _py(transfer_cap)
+    elif "환승" in lim:
         out["max_transfers"] = _py(lim["환승"])
     return out
 
@@ -550,16 +559,33 @@ def rank_routes(
         return {"ranking": [], "robust": True, "applied_limits": {}, "applied_weights": {}}
 
     df = _candidates_to_df(candidates)
+    lim, applied_src, arrive_by = _limits_from_request(limits, df)
+    transfer_cap = lim.pop("환승", None)
+    if transfer_cap is not None:
+        df = df[pd.to_numeric(df["환승계"], errors="coerce").fillna(0) <= transfer_cap + EPS].copy()
+        df = df.reset_index(drop=True)
+    if len(df) == 0:
+        return {
+            "ranking": [],
+            "robust": True,
+            "applied_limits": _applied_limits({}, applied_src, arrive_by, transfer_cap),
+            "applied_weights": {},
+        }
+
     df = pareto_front(df)
     df, _merged = dedupe_routes(df, verbose=False)
     if len(df) == 0:
-        return {"ranking": [], "robust": True, "applied_limits": {}, "applied_weights": {}}
+        return {
+            "ranking": [],
+            "robust": True,
+            "applied_limits": _applied_limits({}, applied_src, arrive_by, transfer_cap),
+            "applied_weights": {},
+        }
 
     df, knee_ok, _knee_why = add_knee_score(df)
     anc = anchors(df)
     use_knee = knee_ok and not anc.get("Knee", {}).get("degenerate", True)
 
-    lim, applied_src, arrive_by = _limits_from_request(limits, df)
     lim = _drop_nonbinding(lim, anc)
 
     if betas is not None:
@@ -590,6 +616,6 @@ def rank_routes(
     return {
         "ranking": ranking,
         "robust": bool(robust),
-        "applied_limits": _applied_limits(lim, applied_src, arrive_by),
+        "applied_limits": _applied_limits(lim, applied_src, arrive_by, transfer_cap),
         "applied_weights": {k: _py(float(v)) for k, v in w.items()},
     }

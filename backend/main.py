@@ -78,12 +78,18 @@ class RankBetasIn(BaseModel):
     knee: float | None = None
 
 
+class RankImportanceIn(BaseModel):
+    time: str | None = None
+    cost: str | None = None
+    duration: str | None = None
+
+
 class RankIn(BaseModel):
     candidates: list[dict]
     limits: RankLimitsIn
     weights: dict[str, float] | None = None
     betas: RankBetasIn | dict | None = None
-    importance: dict | None = None
+    importance: RankImportanceIn | dict | None = None
     psi: float | None = Field(default=0.0)
 
 
@@ -215,13 +221,17 @@ def routes_rank(body: RankIn):
         if body.betas is not None:
             raw = body.betas.model_dump() if hasattr(body.betas, "model_dump") else dict(body.betas)
             betas = {k: v for k, v in raw.items() if v is not None} or None
+        importance = None
+        if body.importance is not None:
+            raw_imp = body.importance.model_dump() if hasattr(body.importance, "model_dump") else dict(body.importance)
+            importance = {k: v for k, v in raw_imp.items() if v is not None} or None
         return rank_routes(
             candidates=body.candidates,
             limits=body.limits.model_dump(),
             weights=body.weights,
             psi=0.0 if body.psi is None else body.psi,
             betas=betas,
-            importance=body.importance,
+            importance=importance,
         )
     except HTTPException:
         raise
