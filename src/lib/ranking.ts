@@ -21,9 +21,9 @@ export const IMPORTANCE_VALUE: Record<RankImportanceLevel, number> = {
 }
 
 export const IMPORTANCE_OPTIONS: { value: RankImportanceLevel; label: string }[] = [
-  { value: 'high', label: '상' },
-  { value: 'mid', label: '중' },
   { value: 'low', label: '하' },
+  { value: 'mid', label: '중' },
+  { value: 'high', label: '상' },
 ]
 
 const LEVEL_ALIASES: Record<string, RankImportanceLevel> = {
@@ -156,4 +156,10 @@ export function parseStoredPreset(raw: unknown) {
       cost: nested.cost,
     }),
   }
+}
+
+export function hydrateRankingPreset(raw: unknown): { betas: RankingBetas; importance: RankImportance } | null {
+  const parsed = parseStoredPreset(raw)
+  if (!parsed) return null
+  return { betas: { gc: parsed.gc, knee: parsed.knee }, importance: parsed.importance }
 }

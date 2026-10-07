@@ -1731,29 +1731,32 @@ function SPCompleteScreen({ onNav }: { onNav: (s: Screen) => void }) {
   )
 }
 
-function ImportanceSegment({
+function ImportanceCard({
   value,
   onChange,
-  ariaLabel,
 }: {
   value: RankImportanceLevel
   onChange: (value: RankImportanceLevel) => void
-  ariaLabel: string
 }) {
   return (
-    <div className="grid shrink-0 grid-cols-3 gap-1 rounded-[10px] bg-[#F1F3F6] p-1" role="group" aria-label={ariaLabel}>
-      {IMPORTANCE_OPTIONS.map(option => (
-        <button
-          type="button"
-          key={option.value}
-          onClick={() => onChange(option.value)}
-          className={`h-8 min-w-8 rounded-lg px-2 text-[13px] font-semibold ${
-            value === option.value ? 'bg-[#2F7BF6] text-white shadow-sm' : 'text-[#8A94A6]'
-          }`}
-        >
-          {option.label}
-        </button>
-      ))}
+    <div className="mt-4 border-t border-[#F0F2F5] pt-3">
+      <div className="mb-2 text-[12px] font-semibold text-[#596273]">중요도</div>
+      <div className="grid grid-cols-3 gap-1 rounded-[10px] bg-[#F1F3F6] p-1">
+        {IMPORTANCE_OPTIONS.map(option => (
+          <button
+            type="button"
+            key={option.value}
+            onClick={() => onChange(option.value)}
+            className={`h-8 rounded-lg text-[13px] font-semibold transition-all ${
+              value === option.value
+                ? 'bg-[#2F7BF6] text-white shadow-sm'
+                : 'text-[#8A94A6]'
+            }`}
+          >
+            {option.label}
+          </button>
+        ))}
+      </div>
     </div>
   )
 }
@@ -2776,13 +2779,6 @@ function ReservationScreen({ onNav }: { onNav: NavTo }) {
             <span className={`text-[13px] font-semibold ${enabled.time ? 'text-[#2F7BF6]' : 'text-[#8A94A6]'}`}>
               {enabled.time ? `${arrivalTime}까지` : '상관없음'}
             </span>
-            {enabled.time && (
-              <ImportanceSegment
-                value={importance.time || 'mid'}
-                onChange={level => setImportance(current => ({ ...current, time: level }))}
-                ariaLabel="시간 중요도"
-              />
-            )}
             {renderToggle('time')}
           </div>
           {enabled.time && (
@@ -2837,6 +2833,10 @@ function ReservationScreen({ onNav }: { onNav: NavTo }) {
                   </button>
                 ))}
               </div>
+              <ImportanceCard
+                value={importance.time || 'mid'}
+                onChange={level => setImportance(current => ({ ...current, time: level }))}
+              />
             </>
           )}
         </div>
@@ -2847,13 +2847,6 @@ function ReservationScreen({ onNav }: { onNav: NavTo }) {
             <span className={`text-[13px] font-semibold ${enabled.duration ? 'text-[#2F7BF6]' : 'text-[#8A94A6]'}`}>
               {enabled.duration && maxTime ? `${maxTime}분 이내` : '상관없음'}
             </span>
-            {enabled.duration && (
-              <ImportanceSegment
-                value={importance.time || 'mid'}
-                onChange={level => setImportance(current => ({ ...current, time: level }))}
-                ariaLabel="시간 중요도"
-              />
-            )}
             {renderToggle('duration')}
           </div>
           {enabled.duration && (
@@ -2867,6 +2860,10 @@ function ReservationScreen({ onNav }: { onNav: NavTo }) {
                 onChange={event => setMaxTime(event.target.value)}
                 className="mt-4 w-full rounded-xl bg-[#F7F9FC] px-4 py-3 text-[14px] text-[#182230] outline-none placeholder-[#9CA3AF]"
               />
+              <ImportanceCard
+                value={importance.time || 'mid'}
+                onChange={level => setImportance(current => ({ ...current, time: level }))}
+              />
             </>
           )}
         </div>
@@ -2877,13 +2874,6 @@ function ReservationScreen({ onNav }: { onNav: NavTo }) {
             <span className={`text-[13px] font-semibold ${enabled.cost ? 'text-[#2F7BF6]' : 'text-[#8A94A6]'}`}>
               {enabled.cost ? `${fmt(minCost)}원 ~ ${fmt(maxCost)}원` : '상관없음'}
             </span>
-            {enabled.cost && (
-              <ImportanceSegment
-                value={importance.cost || 'mid'}
-                onChange={level => setImportance(current => ({ ...current, cost: level }))}
-                ariaLabel="비용 중요도"
-              />
-            )}
             {renderToggle('cost')}
           </div>
           {enabled.cost && (
@@ -2920,6 +2910,10 @@ function ReservationScreen({ onNav }: { onNav: NavTo }) {
                 <span>최대 {fmt(maxCost)}원</span>
               </div>
               {costHint && <div className="mt-2 text-[12px] text-[#9CA3AF]">{costHint}</div>}
+              <ImportanceCard
+                value={importance.cost || 'mid'}
+                onChange={level => setImportance(current => ({ ...current, cost: level }))}
+              />
             </>
           )}
         </div>
