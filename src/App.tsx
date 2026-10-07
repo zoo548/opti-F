@@ -21,12 +21,24 @@ import {
   type SurveyResponse,
 } from '@/lib/api'
 import { getEffectiveParams, MANUAL_COEFFS, parseManualCoeff, parseManualVot, sanitizeManualParams, VOT_MAX, VOT_MIN, type ManualCoeffKey, type ManualParams, type ParamSource } from '@/lib/params'
-import { BETA_MAX, betasEqual, conditionShare, DEFAULT_BETAS, parseManualBetas, previewLine, previewWeights, type RankingBetas } from '@/lib/ranking'
+import { BETA_MAX, betasEqual, DEFAULT_BETAS, importanceFromPrefs, parseManualBetas, ratioPreviewLine, TIME_COST_CHIPS, type RankingBetas } from '@/lib/ranking'
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 type Screen =
   | 'home' | 'sp-setup' | 'sp-question' | 'sp-complete' | 'sp-profile'
   | 'search-input' | 'analyzing' | 'results' | 'reservation' | 'regret' | 'detail'
+
+type NavTo = (screen: Screen, opts?: { advanced?: boolean; back?: Screen }) => void
+
+type ReservationDraft = {
+  arrivalTime: string
+  quickTime: string
+  maxTime: string
+  minCost: number
+  maxCost: number
+  transferLimit: number
+  enabled: { time: boolean; cost: boolean; transfer: boolean; duration: boolean }
+}
 
 type TripContextValue = {
   origin: Place | null
@@ -56,6 +68,8 @@ type TripContextValue = {
   applyRank: (limits: RankLimits, candidates?: RouteCandidate[]) => Promise<void>
   clearRanking: () => void
   rankedBetas: RankingBetas | null
+  reservationDraft: ReservationDraft | null
+  setReservationDraft: (draft: ReservationDraft | null) => void
 }
 
 const TripContext = createContext<TripContextValue | null>(null)
@@ -1697,30 +1711,42 @@ function SPCompleteScreen({ onNav }: { onNav: (s: Screen) => void }) {
   )
 }
 
+function AppliedWeightsHint({ onChange }: { onChange: () => void }) {
+  const sp = useSp()
+  return (
+    <div className="text-[11px] leading-relaxed text-[#9CA3AF]">
+      {ratioPreviewLine(sp.rankingBetas)}
+      <button
+        type="button"
+        className="ml-1.5 font-semibold text-[#2F7BF6]"
+        onClick={onChange}
+      >
+        변경
+      </button>
+    </div>
+  )
+}
+
 function RankingWeightSection() {
   const sp = useSp()
-  const trip = useTrip()
   const betas = sp.rankingBetas
-  const split = conditionShare(betas.gc, betas.knee)
-  const restPct = Math.round(split.rest * 100)
   const rawRest = 1 - betas.gc - betas.knee
-  const limits = trip.appliedLimits || trip.pendingLimits
-  const axes: Array<'time' | 'cost' | 'transfer'> = []
-  if (limits?.arrive_by || limits?.max_time_min != null) axes.push('time')
-  if (limits?.max_cost_krw != null) axes.push('cost')
-  if (limits?.max_transfers != null) axes.push('transfer')
-  const previewAxes = axes.length ? axes : (['time', 'cost', 'transfer'] as const)
-  const weights = previewWeights(betas, [...previewAxes], limits?.importance)
+  const timePct = Math.round(clampDisplayShare(betas.timeShare) * 100)
+  const costPct = 100 - timePct
   const setPct = (key: 'gc' | 'knee', pct: number) => {
     const next = Math.max(0, Math.min(BETA_MAX * 100, Math.round(pct))) / 100
     sp.setRankingBetas({ ...betas, [key]: next })
+  }
+  const setTimeShare = (share: number) => {
+    const next = Math.max(0, Math.min(100, Math.round(share * 100))) / 100
+    sp.setRankingBetas({ ...betas, timeShare: next })
   }
 
   return (
     <div className="rounded-xl bg-[#F9FAFB] px-3 py-3 space-y-3">
       <div>
         <div className="text-[13px] font-semibold text-[#111827]">추천 기준 비중</div>
-        <div className="mt-0.5 text-[11px] text-[#9CA3AF]">가성비와 균형점 비중을 조절하면, 나머지는 내가 정한 조건에 쓰여요.</div>
+        <div className="mt-0.5 text-[11px] text-[#9CA3AF]">가성비·균형점과 시간 대 비용 비율을 여기서 조절해요.</div>
       </div>
       <div>
         <div className="flex items-center justify-between mb-1">
@@ -1754,13 +1780,46 @@ function RankingWeightSection() {
           className="w-full"
         />
       </div>
-      <div className="text-[12px] text-[#374151]">
-        내 조건(시간·요금·환승) {restPct}%
-      </div>
       {rawRest < 0.1 - 1e-9 && (
         <div className="text-[11px] text-[#B45309]">가성비와 균형점 합이 90%를 넘어, 내 조건 몫을 10%로 맞춰 적용해요.</div>
       )}
-      <div className="text-[12px] font-medium text-[#111827]">{previewLine(weights)}</div>
+      <div>
+        <div className="flex items-center justify-between mb-2">
+          <span className="text-[13px] font-semibold text-[#111827]">시간 vs 비용</span>
+          <span className="text-[12px] font-bold text-[#374151]">{timePct}:{costPct}</span>
+        </div>
+        <div className="grid grid-cols-3 gap-1.5 mb-3">
+          {TIME_COST_CHIPS.map(chip => (
+            <button
+              type="button"
+              key={chip.label}
+              onClick={() => setTimeShare(chip.timeShare)}
+              className={`h-9 rounded-lg px-1 text-[11px] font-semibold leading-tight ${
+                Math.abs(clampDisplayShare(betas.timeShare) - chip.timeShare) < 0.005
+                  ? 'bg-[#2F7BF6] text-white'
+                  : 'bg-white text-[#687386] border border-[#E5E7EB]'
+              }`}
+            >
+              {chip.label}
+            </button>
+          ))}
+        </div>
+        <div className="flex items-center justify-between text-[11px] text-[#9CA3AF] mb-1">
+          <span>빨리 도착</span>
+          <span>저렴하게</span>
+        </div>
+        <input
+          type="range"
+          min={0}
+          max={100}
+          step={1}
+          value={costPct}
+          aria-label="시간 대 비용 비율"
+          onChange={event => setTimeShare((100 - Number(event.target.value)) / 100)}
+          className="w-full"
+        />
+      </div>
+      <div className="text-[12px] font-medium text-[#111827]">{ratioPreviewLine(betas)}</div>
       <button
         type="button"
         onClick={() => sp.resetRankingBetas()}
@@ -1772,7 +1831,12 @@ function RankingWeightSection() {
   )
 }
 
-function SPProfileScreen({ onNav }: { onNav: (s: Screen) => void }) {
+function clampDisplayShare(value: number) {
+  if (!Number.isFinite(value)) return 0.5
+  return Math.min(1, Math.max(0, value))
+}
+
+function SPProfileScreen({ onNav, startAdvanced = false, backTo = 'home' }: { onNav: NavTo; startAdvanced?: boolean; backTo?: Screen }) {
   const sp = useSp()
   const params = sp.routeParams
   const weights = sp.profile?.weights_relative_to_uncrowded_subway || {}
@@ -1785,9 +1849,18 @@ function SPProfileScreen({ onNav }: { onNav: (s: Screen) => void }) {
   const vot = Math.round(effective.vot)
   const [manualDraft, setManualDraft] = useState(sp.manualVot != null ? String(sp.manualVot) : '')
   const [manualError, setManualError] = useState('')
-  const [advancedOpen, setAdvancedOpen] = useState(false)
+  const [advancedOpen, setAdvancedOpen] = useState(startAdvanced)
   const [coeffDraft, setCoeffDraft] = useState<Record<string, string>>({})
   const [coeffError, setCoeffError] = useState<Partial<Record<ManualCoeffKey, string>>>({})
+  const advancedRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (!startAdvanced) return
+    setAdvancedOpen(true)
+    const timer = window.setTimeout(() => {
+      advancedRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    }, 50)
+    return () => window.clearTimeout(timer)
+  }, [startAdvanced])
   const transferMin = effective.params.transfer_penalty
   const taxiW = effective.params.delta_taxi
   const details = params ? [
@@ -1800,7 +1873,7 @@ function SPProfileScreen({ onNav }: { onNav: (s: Screen) => void }) {
 
   return (
     <div className="flex flex-col h-full bg-[#F9FAFB]">
-      <NavHeader title="내 프로필" subtitle="설문으로 맞춘 나의 시간가치" onBack={() => onNav('home')} />
+      <NavHeader title="내 프로필" subtitle="설문으로 맞춘 나의 시간가치" onBack={() => onNav(backTo)} />
       <div className="flex-1 overflow-y-auto px-5 py-4 space-y-3 pb-5">
         {/* Toggle */}
         <div className="bg-white rounded-2xl p-4 border border-[#E5E7EB]">
@@ -1924,7 +1997,7 @@ function SPProfileScreen({ onNav }: { onNav: (s: Screen) => void }) {
           ))}
         </div>
 
-        <div className="bg-white rounded-2xl border border-[#E5E7EB] overflow-hidden">
+        <div ref={advancedRef} className="bg-white rounded-2xl border border-[#E5E7EB] overflow-hidden">
           <button
             type="button"
             onClick={() => setAdvancedOpen(open => !open)}
@@ -2206,7 +2279,7 @@ function AnalyzingScreen({ onNav }: { onNav: (s: Screen) => void }) {
 
 type RouteType = 'all' | 'hybrid' | 'transit' | 'taxi'
 
-function ResultsScreen({ onNav }: { onNav: (s: Screen) => void }) {
+function ResultsScreen({ onNav }: { onNav: NavTo }) {
   const trip = useTrip()
   const sp = useSp()
   const [tab, setTab] = useState<RouteType>('all')
@@ -2294,6 +2367,12 @@ function ResultsScreen({ onNav }: { onNav: (s: Screen) => void }) {
           {limitsSummary(trip.appliedLimits) || '조건 없음'}
         </button>
       </div>
+
+      {trip.ranking && (
+        <div className="px-4 py-2 border-b border-[#F3F4F6]">
+          <AppliedWeightsHint onChange={() => onNav('sp-profile', { advanced: true, back: 'results' })} />
+        </div>
+      )}
 
       {trip.ranking && trip.appliedLimits && !betasEqual(sp.rankingBetas, trip.rankedBetas) && (
         <div className="px-4 py-2.5 border-b border-[#F3F4F6] bg-[#FFF7ED]">
@@ -2439,7 +2518,11 @@ function ResultsScreen({ onNav }: { onNav: (s: Screen) => void }) {
           { icon: '📋', label: 'SP 설문', screen: 'sp-setup' },
           { icon: '👤', label: '프로필', screen: 'sp-profile' },
         ].map(({ icon, label, screen }) => (
-          <button key={label} onClick={() => onNav(screen as Screen)} className="flex flex-col items-center gap-1">
+          <button
+            key={label}
+            onClick={() => onNav(screen as Screen, screen === 'sp-profile' ? { back: 'results' } : undefined)}
+            className="flex flex-col items-center gap-1"
+          >
             <span className="text-xl">{icon}</span>
             <span className="text-[10px] text-[#9CA3AF] font-medium">{label}</span>
           </button>
@@ -2534,11 +2617,12 @@ function DetailScreen({ onNav }: { onNav: (s: Screen) => void }) {
   )
 }
 
-function ReservationScreen({ onNav }: { onNav: (s: Screen) => void }) {
+function ReservationScreen({ onNav }: { onNav: NavTo }) {
   type Condition = 'time' | 'cost' | 'transfer' | 'duration'
-  type Strictness = 'low' | 'medium' | 'high'
   const trip = useTrip()
+  const sp = useSp()
   const seed = trip.appliedLimits || trip.pendingLimits
+  const draft = trip.reservationDraft
   const candidates = trip.analysis?.candidates ?? []
   const taxiOnly = candidates.find(item => item.type === 'TT')
   const transitOnly = candidates.find(item => item.type === 'PP')
@@ -2559,30 +2643,18 @@ function ReservationScreen({ onNav }: { onNav: (s: Screen) => void }) {
     transitOnly ? { label: '대중교통만', value: arrivalLabel(trip.departTime, transitOnly.total_time) } : undefined,
   )
 
-  const [arrivalTime, setArrivalTime] = useState(() => seed?.arrive_by ? clockLabel(seed.arrive_by) : clockLabel(trip.departTime))
-  const [quickTime, setQuickTime] = useState('직접 입력')
-  const [maxTime, setMaxTime] = useState(seed?.max_time_min != null ? String(Math.round(seed.max_time_min)) : '')
-  const [minCost, setMinCost] = useState(5000)
-  const [maxCost, setMaxCost] = useState(seed?.max_cost_krw != null ? Number(seed.max_cost_krw) : 20000)
-  const [transferLimit, setTransferLimit] = useState(seed?.max_transfers != null ? Number(seed.max_transfers) : 2)
-  const [strictness, setStrictness] = useState<Record<Condition, Strictness>>({
-    time: seed?.importance?.time || 'medium',
-    cost: seed?.importance?.cost || 'medium',
-    transfer: seed?.importance?.transfer || 'medium',
-    duration: seed?.importance?.duration || seed?.importance?.time || 'medium',
-  })
-  const [enabled, setEnabled] = useState<Record<Condition, boolean>>({
+  const [arrivalTime, setArrivalTime] = useState(() => draft?.arrivalTime || (seed?.arrive_by ? clockLabel(seed.arrive_by) : clockLabel(trip.departTime)))
+  const [quickTime, setQuickTime] = useState(draft?.quickTime || '직접 입력')
+  const [maxTime, setMaxTime] = useState(draft?.maxTime ?? (seed?.max_time_min != null ? String(Math.round(seed.max_time_min)) : ''))
+  const [minCost, setMinCost] = useState(draft?.minCost ?? 5000)
+  const [maxCost, setMaxCost] = useState(draft?.maxCost ?? (seed?.max_cost_krw != null ? Number(seed.max_cost_krw) : 20000))
+  const [transferLimit, setTransferLimit] = useState(draft?.transferLimit ?? (seed?.max_transfers != null ? Number(seed.max_transfers) : 2))
+  const [enabled, setEnabled] = useState<Record<Condition, boolean>>(() => draft?.enabled ?? ({
     time: Boolean(seed?.arrive_by),
     cost: seed?.max_cost_krw != null,
     transfer: seed?.max_transfers != null,
     duration: seed?.max_time_min != null,
-  })
-
-  const strictnessOptions: { value: Strictness; label: string }[] = [
-    { value: 'low', label: '하' },
-    { value: 'medium', label: '중' },
-    { value: 'high', label: '상' },
-  ]
+  }))
 
   const formatTime = (value: string) => {
     const [hour, minute] = value.split(':').map(Number)
@@ -2634,51 +2706,33 @@ function ReservationScreen({ onNav }: { onNav: (s: Screen) => void }) {
     </button>
   )
 
-  const renderStrictness = (key: Condition) => {
-    return (
-      <div className="mt-4 border-t border-[#F0F2F5] pt-3">
-        <div className="mb-2 text-[12px] font-semibold text-[#596273]">중요도</div>
-        <div className="grid grid-cols-3 gap-1 rounded-[10px] bg-[#F1F3F6] p-1">
-          {strictnessOptions.map(option => (
-            <button
-              type="button"
-              key={option.value}
-              onClick={() => setStrictness(current => ({ ...current, [key]: option.value }))}
-              className={`h-8 rounded-lg text-[13px] font-semibold transition-all ${
-                strictness[key] === option.value
-                  ? 'bg-[#2F7BF6] text-white shadow-sm'
-                  : 'text-[#8A94A6]'
-              }`}
-            >
-              {option.label}
-            </button>
-          ))}
-        </div>
-      </div>
-    )
-  }
-
   const collectLimits = (): RankLimits | null => {
     const limits: RankLimits = {}
-    const importance: NonNullable<RankLimits['importance']> = {}
-    if (enabled.duration && maxTime.trim()) {
-      limits.max_time_min = Number(maxTime)
-      importance.duration = strictness.duration
-    }
-    if (enabled.cost) {
-      limits.max_cost_krw = maxCost
-      importance.cost = strictness.cost
-    }
-    if (enabled.transfer) {
-      limits.max_transfers = transferLimit
-      importance.transfer = strictness.transfer
-    }
-    if (enabled.time) {
-      limits.arrive_by = arrivalToIso(trip.departTime, arrivalTime)
-      importance.time = strictness.time
-    }
-    if (Object.keys(importance).length) limits.importance = importance
-    return hasLimits(limits) ? limits : null
+    if (enabled.duration && maxTime.trim()) limits.max_time_min = Number(maxTime)
+    if (enabled.cost) limits.max_cost_krw = maxCost
+    if (enabled.transfer) limits.max_transfers = transferLimit
+    if (enabled.time) limits.arrive_by = arrivalToIso(trip.departTime, arrivalTime)
+    if (!hasLimits(limits)) return null
+    limits.importance = importanceFromPrefs(limits, sp.rankingBetas)
+    return limits
+  }
+
+  const saveDraft = () => {
+    trip.setReservationDraft({
+      arrivalTime,
+      quickTime,
+      maxTime,
+      minCost,
+      maxCost,
+      transferLimit,
+      enabled,
+    })
+  }
+
+  const openWeightSettings = () => {
+    saveDraft()
+    trip.setPendingLimits(collectLimits())
+    onNav('sp-profile', { advanced: true, back: 'reservation' })
   }
 
   return (
@@ -2757,7 +2811,6 @@ function ReservationScreen({ onNav }: { onNav: (s: Screen) => void }) {
                   </button>
                 ))}
               </div>
-              {renderStrictness('time')}
             </>
           )}
         </div>
@@ -2781,7 +2834,6 @@ function ReservationScreen({ onNav }: { onNav: (s: Screen) => void }) {
                 onChange={event => setMaxTime(event.target.value)}
                 className="mt-4 w-full rounded-xl bg-[#F7F9FC] px-4 py-3 text-[14px] text-[#182230] outline-none placeholder-[#9CA3AF]"
               />
-              {renderStrictness('duration')}
             </>
           )}
         </div>
@@ -2828,7 +2880,6 @@ function ReservationScreen({ onNav }: { onNav: (s: Screen) => void }) {
                 <span>최대 {fmt(maxCost)}원</span>
               </div>
               {costHint && <div className="mt-2 text-[12px] text-[#9CA3AF]">{costHint}</div>}
-              {renderStrictness('cost')}
             </>
           )}
         </div>
@@ -2865,9 +2916,11 @@ function ReservationScreen({ onNav }: { onNav: (s: Screen) => void }) {
                 </button>
               </div>
               {transferHint && <div className="mt-2 text-center text-[12px] text-[#9CA3AF]">{transferHint}</div>}
-              {renderStrictness('transfer')}
             </>
           )}
+        </div>
+        <div className="px-1 pt-1">
+          <AppliedWeightsHint onChange={openWeightSettings} />
         </div>
       </div>
 
@@ -2878,6 +2931,7 @@ function ReservationScreen({ onNav }: { onNav: (s: Screen) => void }) {
         <button
           type="button"
           onClick={() => {
+            saveDraft()
             trip.setPendingLimits(collectLimits())
             onNav('analyzing')
           }}
@@ -2888,6 +2942,7 @@ function ReservationScreen({ onNav }: { onNav: (s: Screen) => void }) {
         <button
           type="button"
           onClick={() => {
+            saveDraft()
             trip.setPendingLimits(null)
             onNav('analyzing')
           }}
@@ -3045,6 +3100,9 @@ export default function App() {
     return parseManualBetas(store?.manual_betas) ?? { ...DEFAULT_BETAS }
   })
   const [rankedBetas, setRankedBetas] = useState<RankingBetas | null>(null)
+  const [reservationDraft, setReservationDraft] = useState<ReservationDraft | null>(null)
+  const [profileBack, setProfileBack] = useState<Screen>('home')
+  const [startAdvanced, setStartAdvanced] = useState(false)
   const [displayAge, setDisplayAge] = useState(storedProfile?.display_age || storedProfile?.age_group || '')
   const [displayPurpose, setDisplayPurpose] = useState(storedProfile?.display_purpose || storedProfile?.purpose || '')
   const [questionCount, setQuestionCount] = useState(storedProfile?.length || 0)
@@ -3261,9 +3319,13 @@ export default function App() {
     setRankingBusy(true)
     setRankError(null)
     try {
-      const result = await rankRoutes(source, limits, rankingBetas)
+      const withImportance = {
+        ...limits,
+        importance: importanceFromPrefs(limits, rankingBetas),
+      }
+      const result = await rankRoutes(source, withImportance, { gc: rankingBetas.gc, knee: rankingBetas.knee })
       setRanking(result)
-      setAppliedLimits(limits)
+      setAppliedLimits(withImportance)
       setRankedBetas({ ...rankingBetas })
     } catch (error) {
       const message = error instanceof Error ? error.message : '조건 적용에 실패했습니다.'
@@ -3309,6 +3371,8 @@ export default function App() {
     applyRank,
     clearRanking,
     rankedBetas,
+    reservationDraft,
+    setReservationDraft,
   }
 
   const sp: SpContextValue = {
@@ -3340,18 +3404,26 @@ export default function App() {
     resetRankingBetas,
   }
 
+  const navigate: NavTo = (next, opts) => {
+    if (next === 'sp-profile') {
+      setProfileBack(opts?.back ?? 'home')
+      setStartAdvanced(Boolean(opts?.advanced))
+    }
+    setScreen(next)
+  }
+
   const screens: Record<Screen, React.ReactNode> = {
-    'home': <HomeScreen onNav={setScreen} />,
-    'sp-setup': <SPSetupScreen onNav={setScreen} />,
-    'sp-question': <SPQuestionScreen onNav={setScreen} />,
-    'sp-complete': <SPCompleteScreen onNav={setScreen} />,
-    'sp-profile': <SPProfileScreen onNav={setScreen} />,
-    'search-input': <SearchInputScreen onNav={setScreen} />,
-    'analyzing': <AnalyzingScreen onNav={setScreen} />,
-    'results': <ResultsScreen onNav={setScreen} />,
-    'reservation': <ReservationScreen onNav={setScreen} />,
-    'regret': <RegretScreen onNav={setScreen} />,
-    'detail': <DetailScreen onNav={setScreen} />,
+    'home': <HomeScreen onNav={navigate} />,
+    'sp-setup': <SPSetupScreen onNav={navigate} />,
+    'sp-question': <SPQuestionScreen onNav={navigate} />,
+    'sp-complete': <SPCompleteScreen onNav={navigate} />,
+    'sp-profile': <SPProfileScreen onNav={navigate} startAdvanced={startAdvanced} backTo={profileBack} />,
+    'search-input': <SearchInputScreen onNav={navigate} />,
+    'analyzing': <AnalyzingScreen onNav={navigate} />,
+    'results': <ResultsScreen onNav={navigate} />,
+    'reservation': <ReservationScreen onNav={navigate} />,
+    'regret': <RegretScreen onNav={navigate} />,
+    'detail': <DetailScreen onNav={navigate} />,
   }
 
   return (

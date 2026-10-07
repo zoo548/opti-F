@@ -42,10 +42,10 @@ export type AnalyzeResponse = {
 export type RankImportanceLevel = 'low' | 'medium' | 'high'
 
 export type RankImportance = {
-  time?: RankImportanceLevel
-  duration?: RankImportanceLevel
-  cost?: RankImportanceLevel
-  transfer?: RankImportanceLevel
+  time?: RankImportanceLevel | number
+  duration?: RankImportanceLevel | number
+  cost?: RankImportanceLevel | number
+  transfer?: RankImportanceLevel | number
 }
 
 export type RankLimits = {
