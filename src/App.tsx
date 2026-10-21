@@ -20,7 +20,7 @@ import {
   type SpProfile,
   type SurveyResponse,
 } from '@/lib/api'
-import { getEffectiveParams, MANUAL_COEFFS, parseManualCoeff, parseManualVot, sanitizeManualParams, VOT_MAX, VOT_MIN, type ManualCoeffKey, type ManualParams, type ParamSource } from '@/lib/params'
+import { DEFAULT_ROUTE_PARAMS, getEffectiveParams, MANUAL_COEFFS, parseManualCoeff, parseManualVot, sanitizeManualParams, VOT_MAX, VOT_MIN, type ManualCoeffKey, type ManualParams, type ParamSource } from '@/lib/params'
 import { BETA_MAX, betasEqual, DEFAULT_BETAS, DEFAULT_IMPORTANCE, hydrateRankingPreset, importanceEqual, importanceForLimits, IMPORTANCE_OPTIONS, parseConditionImportance, parseManualBetas, previewLine, previewWeights, type RankImportance, type RankImportanceLevel, type RankingBetas } from '@/lib/ranking'
 import { KIM_PRESET } from '@/lib/presets'
 
@@ -1232,7 +1232,7 @@ function HomeScreen({ onNav }: { onNav: (s: Screen) => void }) {
                       routeParams: sp.routeParams,
                       usePersonal: sp.usePersonal,
                     })
-                    if (effective.sources.vot === 'default') return '나의 VOT · 수단 선호 추정'
+                    if (effective.sources.vot === 'default') return `기본값 ${fmt(Math.round(effective.vot))}원/분 · 설문 전`
                     const tag = effective.sources.vot === 'manual' ? '직접 입력' : '설문 추정'
                     return `내 시간가치 ${fmt(Math.round(effective.vot))}원/분 적용 중 (${tag})`
                   })()}
@@ -1277,7 +1277,7 @@ function SPSetupScreen({ onNav }: { onNav: (s: Screen) => void }) {
   const sp = useSp()
   const [age, setAge] = useState(sp.displayAge || '20대')
   const [purpose, setPurpose] = useState(sp.displayPurpose || '업무/비즈니스')
-  const [vot, setVot] = useState(sp.manualVot != null ? String(sp.manualVot) : '400')
+  const [vot, setVot] = useState(sp.manualVot != null ? String(sp.manualVot) : String(DEFAULT_ROUTE_PARAMS.vot))
   const [qCount, setQCount] = useState(sp.questionCount === 6 || sp.questionCount === 24 ? sp.questionCount : 12)
   const [votError, setVotError] = useState('')
 
@@ -1915,15 +1915,16 @@ function SPProfileScreen({ onNav, startAdvanced = false, backTo = 'home' }: { on
     }, 50)
     return () => window.clearTimeout(timer)
   }, [startAdvanced])
-  const transferMin = effective.params.transfer_penalty
-  const taxiW = effective.params.delta_taxi
-  const details = params ? [
-    { key: 'vot', label: '나의 시간가치', hint: '1분을 아끼기 위해 지불할 의향', value: `${fmt(vot!)}원/분`, bar: Math.min((params.vot / 600) * 100, 100), color: '#2F7BF6' },
-    { key: 'taxi', label: '택시 체감', hint: feelLine('택시', taxiW!), value: (taxiW!).toFixed(2), bar: Math.min((taxiW! / 3) * 100, 100), color: '#FF6B3D' },
-    { key: 'bus', label: '버스 체감', hint: feelLine('버스', weights.bus ?? params.alpha_bus), value: (weights.bus ?? params.alpha_bus).toFixed(2), bar: Math.min(((weights.bus ?? params.alpha_bus) / 3) * 100, 100), color: '#374151' },
-    { key: 'walk', label: '도보 체감', hint: feelLine('도보', weights.walk ?? params.gamma_walk), value: (weights.walk ?? params.gamma_walk).toFixed(2), bar: Math.min(((weights.walk ?? params.gamma_walk) / 3) * 100, 100), color: '#374151' },
-    { key: 'tr', label: '환승 1회', hint: `환승 1회 = ${(transferMin!).toFixed(2)}분`, value: `${(transferMin!).toFixed(2)}분`, bar: Math.min((transferMin! / 20) * 100, 100), color: '#22C55E' },
-  ] : []
+  const p = effective.params
+  const transferMin = p.transfer_penalty
+  const taxiW = p.delta_taxi
+  const details = [
+    { key: 'vot', label: '나의 시간가치', hint: '1분을 아끼기 위해 지불할 의향', value: `${fmt(Math.round(p.vot))}원/분`, bar: Math.min((p.vot / 800) * 100, 100), color: '#2F7BF6' },
+    { key: 'taxi', label: '택시 체감', hint: feelLine('택시', taxiW), value: taxiW.toFixed(2), bar: Math.min((taxiW / 3) * 100, 100), color: '#FF6B3D' },
+    { key: 'bus', label: '버스 체감', hint: feelLine('버스', weights.bus ?? p.alpha_bus), value: (weights.bus ?? p.alpha_bus).toFixed(2), bar: Math.min(((weights.bus ?? p.alpha_bus) / 3) * 100, 100), color: '#374151' },
+    { key: 'walk', label: '도보 체감', hint: feelLine('도보', weights.walk ?? p.gamma_walk), value: (weights.walk ?? p.gamma_walk).toFixed(2), bar: Math.min(((weights.walk ?? p.gamma_walk) / 3) * 100, 100), color: '#374151' },
+    { key: 'tr', label: '환승 1회', hint: `환승 1회 = ${transferMin.toFixed(2)}분`, value: `${transferMin.toFixed(2)}분`, bar: Math.min((transferMin / 20) * 100, 100), color: '#22C55E' },
+  ]
 
   return (
     <div className="flex flex-col h-full bg-[#F9FAFB]">
@@ -2012,8 +2013,11 @@ function SPProfileScreen({ onNav, startAdvanced = false, backTo = 'home' }: { on
             <div className="text-center">
               <div className="text-[11px] text-[#9CA3AF] mb-0.5">시간가치</div>
               <div className="text-[15px] font-bold text-[#2F7BF6]">
-                {effective.sources.vot === 'default' && !sp.routeParams ? '—' : `${fmt(vot)}원/분`}
+                {fmt(vot)}원/분
               </div>
+              {effective.sources.vot === 'default' && (
+                <div className="mt-0.5 text-[10px] font-semibold text-[#6B7280]">기본값</div>
+              )}
             </div>
             <div className="text-center">
               <div className="text-[11px] text-[#9CA3AF] mb-0.5">환승 1회</div>
@@ -2031,9 +2035,7 @@ function SPProfileScreen({ onNav, startAdvanced = false, backTo = 'home' }: { on
           <div className="px-4 py-3 border-b border-[#F3F4F6]">
             <div className="text-[13px] font-semibold text-[#374151]">나의 체감</div>
           </div>
-          {details.length === 0 ? (
-            <div className="px-4 py-3.5 text-[13px] text-[#9CA3AF]">설문을 완료하면 여기에 표시됩니다</div>
-          ) : details.map(row => (
+          {details.map(row => (
             <div key={row.key} className="px-4 py-3.5 border-b border-[#F9FAFB] last:border-0">
               <div className="flex items-start justify-between mb-2">
                 <div>
@@ -2720,16 +2722,16 @@ function ReservationScreen({ onNav }: { onNav: NavTo }) {
     transitOnly ? { label: '대중교통만', value: arrivalLabel(trip.departTime, transitOnly.total_time) } : undefined,
   )
 
-  const [arrivalTime, setArrivalTime] = useState(() => draft?.arrivalTime || (seed?.arrive_by ? clockLabel(seed.arrive_by) : clockLabel(trip.departTime)))
+  const [arrivalTime, setArrivalTime] = useState(() => draft?.arrivalTime || (seed?.arrive_by ? clockLabel(seed.arrive_by) : KIM_PRESET.limits.arrive_hhmm))
   const [quickTime, setQuickTime] = useState(draft?.quickTime || '직접 입력')
   const [maxTime, setMaxTime] = useState(draft?.maxTime ?? (seed?.max_time_min != null ? String(Math.round(seed.max_time_min)) : ''))
   const [minCost, setMinCost] = useState(draft?.minCost ?? 5000)
-  const [maxCost, setMaxCost] = useState(draft?.maxCost ?? (seed?.max_cost_krw != null ? Number(seed.max_cost_krw) : 20000))
-  const [transferLimit, setTransferLimit] = useState(draft?.transferLimit ?? (seed?.max_transfers != null ? Number(seed.max_transfers) : 2))
+  const [maxCost, setMaxCost] = useState(draft?.maxCost ?? (seed?.max_cost_krw != null ? Number(seed.max_cost_krw) : KIM_PRESET.limits.max_cost_krw))
+  const [transferLimit, setTransferLimit] = useState(draft?.transferLimit ?? (seed?.max_transfers != null ? Number(seed.max_transfers) : KIM_PRESET.limits.max_transfers))
   const [enabled, setEnabled] = useState<Record<Condition, boolean>>(() => draft?.enabled ?? ({
-    time: Boolean(seed?.arrive_by),
-    cost: seed?.max_cost_krw != null,
-    transfer: seed?.max_transfers != null,
+    time: seed ? Boolean(seed.arrive_by) : true,
+    cost: seed ? seed.max_cost_krw != null : true,
+    transfer: seed ? seed.max_transfers != null : true,
     duration: seed?.max_time_min != null,
   }))
   const [importance, setImportance] = useState<RankImportance>(() => (
@@ -2905,7 +2907,7 @@ function ReservationScreen({ onNav }: { onNav: NavTo }) {
                 ))}
               </div>
               <ImportanceCard
-                value={importance.time || 'mid'}
+                value={importance.time || DEFAULT_IMPORTANCE.time}
                 onChange={level => setImportance(current => ({ ...current, time: level }))}
               />
             </>
@@ -2932,7 +2934,7 @@ function ReservationScreen({ onNav }: { onNav: NavTo }) {
                 className="mt-4 w-full rounded-xl bg-[#F7F9FC] px-4 py-3 text-[16px] text-[#182230] outline-none placeholder-[#9CA3AF]"
               />
               <ImportanceCard
-                value={importance.time || 'mid'}
+                value={importance.time || DEFAULT_IMPORTANCE.time}
                 onChange={level => setImportance(current => ({ ...current, time: level }))}
               />
             </>
@@ -2982,7 +2984,7 @@ function ReservationScreen({ onNav }: { onNav: NavTo }) {
               </div>
               {costHint && <div className="mt-2 text-[12px] text-[#9CA3AF]">{costHint}</div>}
               <ImportanceCard
-                value={importance.cost || 'mid'}
+                value={importance.cost || DEFAULT_IMPORTANCE.cost}
                 onChange={level => setImportance(current => ({ ...current, cost: level }))}
               />
             </>

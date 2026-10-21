@@ -987,12 +987,12 @@ _PURPOSE_MAP = {
 }
 
 _ENGINE_DEFAULTS = {
-    "vot": 400.0,
-    "alpha_bus": 1.18,
+    "vot": 800.0,
+    "alpha_bus": 1.4,
     "beta_sub": 1.0,
     "beta_sub_c": 1.55,
     "gamma_walk": 2.35,
-    "delta_taxi": 0.88,
+    "delta_taxi": 0.7,
     "transfer_penalty": 11.24,
 }
 

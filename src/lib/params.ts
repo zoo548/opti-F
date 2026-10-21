@@ -9,12 +9,12 @@ export const VOT_MIN = 50
 export const VOT_MAX = 3000
 
 export const DEFAULT_ROUTE_PARAMS: RouteParams = {
-  vot: 400,
-  alpha_bus: 1.18,
+  vot: 800,
+  alpha_bus: 1.4,
   beta_sub: 1.0,
   beta_sub_c: 1.55,
   gamma_walk: 2.35,
-  delta_taxi: 0.88,
+  delta_taxi: 0.7,
   transfer_penalty: 11.24,
 }
 

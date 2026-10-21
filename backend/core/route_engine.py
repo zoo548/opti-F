@@ -1233,15 +1233,15 @@ _TYPE_MAP = {
 }
 
 _DEFAULT_PARAMS = dict(
-    alpha_bus=1.18,
+    alpha_bus=1.4,
     beta_sub=1.0,
     beta_sub_c=1.55,
     gamma_walk=2.35,
-    delta_taxi=0.88,
+    delta_taxi=0.7,
     omega_other=OTHER_TIME_WEIGHT,
     tau_tr=TRANSFER_PENALTY,
     count_mc=True,
-    vot=400.0,
+    vot=800.0,
     threshold=CONGESTION_THRESHOLD,
     max_cand=20,
 )

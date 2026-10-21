@@ -6,7 +6,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from .timeutil import arrive_budget_minutes, format_seoul_iso, parse_iso_to_seoul
+from .timeutil import arrive_budget_minutes, format_seoul_iso, now_seoul, parse_iso_to_seoul
 
 RHO = 0.001
 EPS = 1e-9
@@ -26,7 +26,7 @@ QUALITY = ("GC", "Knee")          # 사용자 상한이 없는 '품질' 축
 # 중복 판정에 쓰는 컬럼. 이 값들이 모두 같으면 모형이 구분할 수 없는 같은 경로다.
 DEDUPE_COLS = ["유형", "가중치_적용_시간", "비용", "실소요시간", "환승계"]
 DEDUPE_DECIMALS = 2
-BETA_GC_DEFAULT = 30.0            # %
+BETA_GC_DEFAULT = 20.0            # %
 BETA_KNEE_DEFAULT = 20.0          # %
 
 _LIMIT_KEYS = {
@@ -353,6 +353,8 @@ def _limits_from_request(limits, df):
 
     depart_raw = limits.get("depart_time") or limits.get("departTime")
     dep = parse_iso_to_seoul(depart_raw) if depart_raw else None
+    if depart_raw and dep is None:
+        raise ValueError("출발 시각 형식을 확인할 수 없습니다.")
     if dep is not None:
         depart_out = format_seoul_iso(dep)
 
@@ -362,7 +364,8 @@ def _limits_from_request(limits, df):
         if t is None:
             raise ValueError("도착 희망 시각 형식을 확인할 수 없습니다.")
         if dep is None:
-            raise ValueError("도착 희망 시각을 쓰려면 출발 시각(depart_time)이 필요합니다.")
+            dep = now_seoul()
+            depart_out = format_seoul_iso(dep)
         lim["시간"] = arrive_budget_minutes(dep, t)
         applied_src["시간"] = "arrive_by"
     elif limits.get("max_time_min") is not None:
@@ -396,6 +399,7 @@ _IMP_LEVEL = {
     "하": 2.0, "중": 3.0, "상": 4.0,
     "low": 2.0, "mid": 3.0, "medium": 3.0, "high": 4.0,
 }
+_DEFAULT_IMP = {"시간": 4.0, "비용": 2.0}  # 상·하
 
 _SCORE_AXES = ("시간", "비용")
 
@@ -426,12 +430,12 @@ def _allocate_weights(bg, bk, lim, use_knee, imp=None):
 
     rest = 1.0 - bg - bk
     if imp is None:
-        imp = {k: 3.0 for k in score_lim}
+        imp = {k: _DEFAULT_IMP.get(k, 3.0) for k in score_lim}
     else:
-        imp = {k: float(imp.get(k, 3.0)) for k in score_lim}
+        imp = {k: float(imp.get(k, _DEFAULT_IMP.get(k, 3.0))) for k in score_lim}
         for k in list(imp):
             if imp[k] <= 0:
-                imp[k] = 3.0
+                imp[k] = _DEFAULT_IMP.get(k, 3.0)
     si = sum(imp.values()) or 1.0
 
     w = {"GC": bg}
@@ -453,7 +457,7 @@ def _parse_importance(importance, lim):
     if not score_lim:
         return {}
     if not importance:
-        return {k: 3.0 for k in score_lim}
+        return {k: _DEFAULT_IMP.get(k, 3.0) for k in score_lim}
     mapped = {}
     if isinstance(importance, dict):
         for key, val in importance.items():
@@ -462,10 +466,10 @@ def _parse_importance(importance, lim):
                 continue
             if isinstance(val, str):
                 token = val.strip()
-                mapped[name] = _IMP_LEVEL.get(token, _IMP_LEVEL.get(token.lower(), 3.0))
+                mapped[name] = _IMP_LEVEL.get(token, _IMP_LEVEL.get(token.lower(), _DEFAULT_IMP.get(name, 3.0)))
             else:
                 mapped[name] = float(val)
-    return {k: mapped.get(k, 3.0) for k in score_lim}
+    return {k: mapped.get(k, _DEFAULT_IMP.get(k, 3.0)) for k in score_lim}
 
 
 def _weights_from_betas(betas, importance, lim, use_knee):

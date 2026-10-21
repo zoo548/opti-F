@@ -11,7 +11,7 @@ export type RankingBetas = {
 }
 
 export const DEFAULT_BETAS: RankingBetas = { gc: 0.2, knee: 0.2 }
-export const DEFAULT_IMPORTANCE: RankImportance = { time: 'mid', cost: 'mid' }
+export const DEFAULT_IMPORTANCE: RankImportance = { time: 'high', cost: 'low' }
 export const BETA_MAX = 0.6
 
 export const IMPORTANCE_VALUE: Record<RankImportanceLevel, number> = {
@@ -93,8 +93,8 @@ export function previewWeights(
     out.cost = split.rest
     return out
   }
-  const timeV = IMPORTANCE_VALUE[importance.time || 'mid']
-  const costV = IMPORTANCE_VALUE[importance.cost || 'mid']
+  const timeV = IMPORTANCE_VALUE[importance.time || DEFAULT_IMPORTANCE.time || 'high']
+  const costV = IMPORTANCE_VALUE[importance.cost || DEFAULT_IMPORTANCE.cost || 'low']
   const sum = timeV + costV || 1
   out.time = split.rest * (timeV / sum)
   out.cost = split.rest * (costV / sum)
@@ -120,8 +120,8 @@ export function importanceForLimits(
   prefs: RankImportance,
 ): RankImportance {
   const out: RankImportance = {}
-  if (limits.arrive_by || limits.max_time_min != null) out.time = prefs.time || 'mid'
-  if (limits.max_cost_krw != null) out.cost = prefs.cost || 'mid'
+  if (limits.arrive_by || limits.max_time_min != null) out.time = prefs.time || DEFAULT_IMPORTANCE.time
+  if (limits.max_cost_krw != null) out.cost = prefs.cost || DEFAULT_IMPORTANCE.cost
   return out
 }
 
@@ -131,7 +131,8 @@ export function betasEqual(a: RankingBetas | null | undefined, b: RankingBetas |
 }
 
 export function importanceEqual(a: RankImportance | null | undefined, b: RankImportance | null | undefined) {
-  return (a?.time || 'mid') === (b?.time || 'mid') && (a?.cost || 'mid') === (b?.cost || 'mid')
+  return (a?.time || DEFAULT_IMPORTANCE.time) === (b?.time || DEFAULT_IMPORTANCE.time)
+    && (a?.cost || DEFAULT_IMPORTANCE.cost) === (b?.cost || DEFAULT_IMPORTANCE.cost)
 }
 
 export const KIM_PRESET = {
@@ -139,6 +140,20 @@ export const KIM_PRESET = {
   gc: 0.2,
   knee: 0.2,
   importance: { time: 'high', cost: 'low' } as RankImportance,
+  params: {
+    vot: 800,
+    alpha_bus: 1.4,
+    beta_sub: 1.0,
+    beta_sub_c: 1.55,
+    gamma_walk: 2.35,
+    delta_taxi: 0.7,
+    transfer_penalty: 11.24,
+  },
+  limits: {
+    arrive_hhmm: '18:10',
+    max_cost_krw: 25000,
+    max_transfers: 3,
+  },
 }
 
 export function parseStoredPreset(raw: unknown) {
