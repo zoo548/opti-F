@@ -598,6 +598,23 @@ def _depart_near_now(depart_iso, window_sec=30 * 60):
     return abs((dt - now_seoul()).total_seconds()) <= window_sec
 
 
+def _depart_delta_sec(depart_iso):
+    dt = _parse_depart_iso(depart_iso)
+    if dt is None:
+        return 0.0
+    return (dt - now_seoul()).total_seconds()
+
+
+def _tmap_live_or_none(tmap_key, s_lat, s_lon, e_lat, e_lon):
+    try:
+        minutes, fare, coords, source = _tmap_live(tmap_key, s_lat, s_lon, e_lat, e_lon)
+        if source == "live":
+            return minutes, fare, coords, "live_fallback"
+        return minutes, fare, coords, source
+    except Exception:
+        return None, None, [], None
+
+
 def _tmap_pred_unavailable():
     with _TMAP_PRED_LOCK:
         return _TMAP_PREDICTION_UNAVAILABLE
@@ -670,6 +687,9 @@ def tmap_taxi(tmap_key, s_lat, s_lon, e_lat, e_lon, depart_iso):
       live_fallback : 예측 실패 후 실시간
       None       : 실패
     """
+    delta = _depart_delta_sec(depart_iso)
+    if delta < 0:
+        return _tmap_live_or_none(tmap_key, s_lat, s_lon, e_lat, e_lon)
     use_prediction = not _depart_near_now(depart_iso) and not _tmap_pred_unavailable()
     if use_prediction:
         try:
@@ -695,13 +715,7 @@ def tmap_taxi(tmap_key, s_lat, s_lon, e_lat, e_lon, depart_iso):
         except Exception as exc:
             _note_tmap_pred(type(exc).__name__)
             log.warning("TMAP prediction error: %s", type(exc).__name__)
-        try:
-            minutes, fare, coords, source = _tmap_live(tmap_key, s_lat, s_lon, e_lat, e_lon)
-            if source == "live":
-                return minutes, fare, coords, "live_fallback"
-            return minutes, fare, coords, source
-        except Exception:
-            return None, None, [], None
+        return _tmap_live_or_none(tmap_key, s_lat, s_lon, e_lat, e_lon)
     try:
         return _tmap_live(tmap_key, s_lat, s_lon, e_lat, e_lon)
     except Exception:
@@ -1390,6 +1404,12 @@ def analyze_routes(
     P = _merge_params(params)
     P["dep_dt"] = to_seoul(depart_dt)
     _clear_tmap_pred_notes()
+    log.info(
+        "  출발 %s / 혼잡도 시트 %s / 시간대 %s시",
+        format_seoul_iso(P["dep_dt"]),
+        _sheet_for(P["dep_dt"]),
+        P["dep_dt"].strftime("%H"),
+    )
     origin = _as_point(origin)
     dest = _as_point(dest)
 
@@ -1469,16 +1489,20 @@ def analyze_routes(
         warnings.append("ODsay 대중교통 경로는 출발 시각 지정을 지원하지 않아 현재 시각 기준 경로를 사용합니다.")
     tmap_notes = _tmap_pred_notes()
     if api_stats.get("tmap_live_fallback"):
-        extra = tmap_notes[0] if tmap_notes else ""
-        warnings.append(
-            f"택시 시간은 현재 교통 기준 ({extra})" if extra else "택시 시간은 현재 교통 기준"
-        )
+        warnings.append("택시 시간은 현재 교통 기준")
     if api_stats.get("tmap_pred_ok"):
         tmap_prediction = "success"
     elif api_stats.get("tmap_live_fallback"):
         tmap_prediction = "fallback"
     else:
         tmap_prediction = "live_now"
+    log.info(
+        "  TMAP 방식 %s / 과거출발=%s / live_fallback=%s / pred_ok=%s",
+        tmap_prediction,
+        P["dep_dt"] < now_seoul(),
+        api_stats.get("tmap_live_fallback", 0),
+        api_stats.get("tmap_pred_ok", 0),
+    )
 
     fastest = None
     cheapest = None

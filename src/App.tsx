@@ -315,6 +315,26 @@ function buildSeoulIso(year: number, month: number, day: number, hour: number, m
   return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}T${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}:00+09:00`
 }
 
+function weekdayKo(parts: { year: number; month: number; day: number }) {
+  const utc = Date.UTC(parts.year, parts.month - 1, parts.day)
+  return ['일', '월', '화', '수', '목', '금', '토'][new Date(utc).getUTCDay()]
+}
+
+function isPastDepartDate(iso: string | null) {
+  if (!iso) return false
+  const now = seoulParts(null)
+  const then = seoulParts(iso)
+  return Date.UTC(then.year, then.month - 1, then.day) < Date.UTC(now.year, now.month - 1, now.day)
+}
+
+function daysInMonth(year: number, month: number) {
+  return new Date(Date.UTC(year, month, 0)).getUTCDate()
+}
+
+function firstWeekday(year: number, month: number) {
+  return new Date(Date.UTC(year, month - 1, 1)).getUTCDay()
+}
+
 function departChipLabel(iso: string) {
   const now = seoulParts(null)
   const then = seoulParts(iso)
@@ -324,7 +344,8 @@ function departChipLabel(iso: string) {
   const clock = `${String(then.hour).padStart(2, '0')}:${String(then.minute).padStart(2, '0')}`
   if (diff === 0) return `오늘 ${clock} 출발`
   if (diff === 1) return `내일 ${clock} 출발`
-  return `${then.month}/${then.day} ${clock} 출발`
+  const base = `${then.month}/${then.day}(${weekdayKo(then)}) ${clock} 출발`
+  return diff < 0 ? `${base} · 지난 날짜` : base
 }
 
 function sourceBadge(source: ParamSource) {
@@ -980,45 +1001,115 @@ function DepartSheet({
 }) {
   const initial = seoulParts(initialIso)
   const today = seoulParts(null)
-  const [dayOffset, setDayOffset] = useState(() => {
-    const a = Date.UTC(today.year, today.month - 1, today.day)
-    const b = Date.UTC(initial.year, initial.month - 1, initial.day)
-    const diff = Math.round((b - a) / 86400000)
-    return Math.min(7, Math.max(0, diff))
-  })
+  const [viewYear, setViewYear] = useState(Number.isFinite(initial.year) ? initial.year : today.year)
+  const [viewMonth, setViewMonth] = useState(Number.isFinite(initial.month) ? initial.month : today.month)
+  const [selectedYear, setSelectedYear] = useState(Number.isFinite(initial.year) ? initial.year : today.year)
+  const [selectedMonth, setSelectedMonth] = useState(Number.isFinite(initial.month) ? initial.month : today.month)
+  const [selectedDay, setSelectedDay] = useState(Number.isFinite(initial.day) ? initial.day : today.day)
   const [hour, setHour] = useState(Number.isFinite(initial.hour) ? initial.hour : today.hour)
-  const [minute, setMinute] = useState(Math.round((Number.isFinite(initial.minute) ? initial.minute : today.minute) / 10) * 10 % 60)
-  const days = Array.from({ length: 8 }, (_, offset) => {
-    const utc = new Date(Date.UTC(today.year, today.month - 1, today.day + offset))
-    const label = offset === 0 ? '오늘' : offset === 1 ? '내일' : `${utc.getUTCMonth() + 1}/${utc.getUTCDate()}`
-    return { offset, label, year: utc.getUTCFullYear(), month: utc.getUTCMonth() + 1, day: utc.getUTCDate() }
-  })
-  const selected = days[dayOffset]
+  const initialMinute = Number.isFinite(initial.minute) ? initial.minute : today.minute
+  const [minute, setMinute] = useState(Math.min(59, Math.max(0, initialMinute)))
+  const [minuteDraft, setMinuteDraft] = useState(String(Math.min(59, Math.max(0, initialMinute))).padStart(2, '0'))
+
+  const shiftMonth = (delta: number) => {
+    const next = new Date(Date.UTC(viewYear, viewMonth - 1 + delta, 1))
+    setViewYear(next.getUTCFullYear())
+    setViewMonth(next.getUTCMonth() + 1)
+  }
+
+  const goToday = () => {
+    setViewYear(today.year)
+    setViewMonth(today.month)
+    setSelectedYear(today.year)
+    setSelectedMonth(today.month)
+    setSelectedDay(today.day)
+  }
+
+  const applyMinute = (value: number) => {
+    const next = Math.min(59, Math.max(0, Math.round(value)))
+    setMinute(next)
+    setMinuteDraft(String(next).padStart(2, '0'))
+  }
+
+  const blanks = firstWeekday(viewYear, viewMonth)
+  const totalDays = daysInMonth(viewYear, viewMonth)
+  const cells = [...Array(blanks).fill(null), ...Array.from({ length: totalDays }, (_, i) => i + 1)]
+  const selectedIso = buildSeoulIso(selectedYear, selectedMonth, selectedDay, hour, minute)
+  const pastDay = isPastDepartDate(selectedIso)
 
   return (
     <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/40" onClick={onClose}>
       <div
-        className="w-full max-w-[430px] rounded-t-2xl bg-white px-5 pb-6 pt-4"
+        className="max-h-[88dvh] w-full max-w-[430px] overflow-y-auto rounded-t-2xl bg-white px-5 pb-6 pt-4"
         onClick={event => event.stopPropagation()}
       >
         <div className="mb-4 text-[15px] font-semibold text-[#111827]">출발 시각 설정</div>
-        <div className="mb-2 text-[12px] font-medium text-[#6B7280]">날짜</div>
-        <div className="mb-4 flex flex-wrap gap-2">
-          {days.map(day => (
-            <button
-              key={day.offset}
-              type="button"
-              onClick={() => setDayOffset(day.offset)}
-              className={`rounded-full px-3 py-1.5 text-[12px] font-semibold ${
-                dayOffset === day.offset ? 'bg-[#2F7BF6] text-white' : 'bg-[#F2F4F7] text-[#687386]'
-              }`}
-            >
-              {day.label}
-            </button>
+        <div className="mb-2 flex items-center justify-between">
+          <div className="text-[12px] font-medium text-[#6B7280]">날짜</div>
+          <button
+            type="button"
+            onClick={goToday}
+            className="rounded-full bg-[#EAF2FF] px-3 py-1 text-[12px] font-semibold text-[#2F7BF6]"
+          >
+            오늘
+          </button>
+        </div>
+        <div className="mb-2 flex items-center justify-between">
+          <button
+            type="button"
+            aria-label="이전 달"
+            onClick={() => shiftMonth(-1)}
+            className="flex h-9 w-9 items-center justify-center rounded-full bg-[#F2F4F7] text-[16px] text-[#374151]"
+          >
+            ‹
+          </button>
+          <div className="text-[14px] font-semibold text-[#111827]">{viewYear}년 {viewMonth}월</div>
+          <button
+            type="button"
+            aria-label="다음 달"
+            onClick={() => shiftMonth(1)}
+            className="flex h-9 w-9 items-center justify-center rounded-full bg-[#F2F4F7] text-[16px] text-[#374151]"
+          >
+            ›
+          </button>
+        </div>
+        <div className="mb-1 grid grid-cols-7 text-center text-[11px] font-medium text-[#9CA3AF]">
+          {['일', '월', '화', '수', '목', '금', '토'].map(label => (
+            <div key={label} className="py-1">{label}</div>
           ))}
         </div>
-        <div className="mb-2 text-[12px] font-medium text-[#6B7280]">시간 (10분 단위)</div>
-        <div className="mb-4 flex items-center gap-2">
+        <div className="mb-4 grid grid-cols-7 gap-y-1">
+          {cells.map((day, index) => {
+            if (day == null) return <div key={`empty-${index}`} />
+            const isSelected = day === selectedDay && viewYear === selectedYear && viewMonth === selectedMonth
+            const isToday = day === today.day && viewYear === today.year && viewMonth === today.month
+            return (
+              <button
+                key={day}
+                type="button"
+                onClick={() => {
+                  setSelectedYear(viewYear)
+                  setSelectedMonth(viewMonth)
+                  setSelectedDay(day)
+                }}
+                className={`mx-auto flex h-9 w-9 items-center justify-center rounded-full text-[13px] font-semibold ${
+                  isSelected
+                    ? 'bg-[#2F7BF6] text-white'
+                    : isToday
+                      ? 'bg-[#EAF2FF] text-[#2F7BF6]'
+                      : 'text-[#374151]'
+                }`}
+              >
+                {day}
+              </button>
+            )
+          })}
+        </div>
+        {pastDay && (
+          <div className="mb-3 text-[12px] font-medium text-[#9CA3AF]">지난 날짜입니다. 혼잡도는 해당 요일·시간대, 택시는 현재 교통 기준으로 계산합니다.</div>
+        )}
+        <div className="mb-2 text-[12px] font-medium text-[#6B7280]">시간</div>
+        <div className="mb-2 flex items-center gap-2">
           <select
             value={hour}
             onChange={event => setHour(Number(event.target.value))}
@@ -1028,19 +1119,40 @@ function DepartSheet({
               <option key={h} value={h}>{String(h).padStart(2, '0')}시</option>
             ))}
           </select>
-          <select
-            value={minute}
-            onChange={event => setMinute(Number(event.target.value))}
-            className="min-h-11 flex-1 rounded-xl border border-[#E5E7EB] bg-white px-3 py-2 text-[16px] text-[#374151] outline-none"
-          >
-            {[0, 10, 20, 30, 40, 50].map(m => (
-              <option key={m} value={m}>{String(m).padStart(2, '0')}분</option>
-            ))}
-          </select>
+          <input
+            type="text"
+            inputMode="numeric"
+            aria-label="분"
+            value={minuteDraft}
+            onChange={event => {
+              const raw = event.target.value.replace(/[^\d]/g, '').slice(0, 2)
+              setMinuteDraft(raw)
+              if (raw === '') return
+              const parsed = Number(raw)
+              if (Number.isFinite(parsed) && parsed >= 0 && parsed <= 59) setMinute(parsed)
+            }}
+            onBlur={() => applyMinute(Number(minuteDraft) || 0)}
+            className="min-h-11 w-24 rounded-xl border border-[#E5E7EB] bg-white px-3 py-2 text-center text-[16px] text-[#374151] outline-none"
+          />
+          <span className="text-[13px] text-[#6B7280]">분</span>
+        </div>
+        <div className="mb-4 flex flex-wrap gap-1.5">
+          {[0, 10, 20, 30, 40, 50].map(value => (
+            <button
+              key={value}
+              type="button"
+              onClick={() => applyMinute(value)}
+              className={`h-8 rounded-full px-3 text-[12px] font-semibold ${
+                minute === value ? 'bg-[#EAF2FF] text-[#2F7BF6]' : 'bg-[#F2F4F7] text-[#687386]'
+              }`}
+            >
+              {String(value).padStart(2, '0')}분
+            </button>
+          ))}
         </div>
         <button
           type="button"
-          onClick={() => onConfirm(buildSeoulIso(selected.year, selected.month, selected.day, hour, minute))}
+          onClick={() => onConfirm(buildSeoulIso(selectedYear, selectedMonth, selectedDay, hour, minute))}
           className="h-12 w-full rounded-xl bg-[#2F7BF6] text-[15px] font-semibold text-white"
         >
           이 시각으로 설정
@@ -1175,7 +1287,7 @@ function HomeScreen({ onNav }: { onNav: (s: Screen) => void }) {
                 }
                 setSheetOpen(true)
               }}
-              className={`flex-1 h-9 rounded-full text-[12px] font-semibold ${
+              className={`flex-1 min-h-9 h-auto rounded-full px-2 py-1.5 text-[11px] leading-tight font-semibold ${
                 trip.departMode === 'scheduled' ? 'bg-[#EAF2FF] text-[#2F7BF6]' : 'bg-[#F2F4F7] text-[#687386]'
               }`}
             >
@@ -2415,6 +2527,11 @@ function ResultsScreen({ onNav }: { onNav: NavTo }) {
         </div>
       </div>
 
+        {isPastDepartDate(trip.departTime) && (
+          <div className="px-4 py-1.5 text-[11px] text-[#9CA3AF] border-b border-[#F3F4F6]">
+            지난 날짜 기준 · 혼잡도는 해당 요일·시간대, 택시는 현재 교통 기준
+          </div>
+        )}
         <div className="flex min-w-0 items-center justify-between gap-2 px-4 py-2 border-b border-[#F3F4F6]">
         <button type="button" onClick={() => onNav('home')} className="min-w-0 flex-1 truncate text-left text-[12px] font-semibold text-[#374151]">
           {trip.appliedLimits?.arrive_by
@@ -2430,7 +2547,7 @@ function ResultsScreen({ onNav }: { onNav: NavTo }) {
         </button>
       </div>
 
-      {(data?.warnings || []).some(item => item.includes('택시 시간은 현재 교통 기준')) && (
+      {!isPastDepartDate(trip.departTime) && (data?.warnings || []).some(item => item.includes('택시 시간은 현재 교통 기준')) && (
         <div className="px-4 py-1.5 text-[11px] text-[#9CA3AF] border-b border-[#F3F4F6]">
           {(data?.warnings || []).find(item => item.includes('택시 시간은 현재 교통 기준'))}
         </div>
